@@ -1,0 +1,9 @@
+architecture: "baseline_mlp"
+in_features: 43
+latent_dim: 64
+hidden_dim: 128
+density_dim: 0
+dropout: 0.1
+use_batchnorm: true
+activation: "relu"
+stochastic_encoder: false

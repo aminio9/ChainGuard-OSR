@@ -1,0 +1,12 @@
+algorithm: "primal_dual_consensus"
+num_clients: 10
+client_fraction: 0.5
+num_rounds: 100
+local_epochs: 5
+batch_size: 128
+primal_dual_rho: 0.1
+covariance_prototype_aggregation: true
+share_classifier_head: false # Decoupled: only encoder and prototypes are aggregated
+partition:
+  strategy: "dirichlet"
+  beta_dirichlet: 0.1

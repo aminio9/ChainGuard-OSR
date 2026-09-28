@@ -1,0 +1,4 @@
+method: "energy_ood"
+temperature: 1.0
+threshold_percentile: 95.0
+score_type: "free_energy"

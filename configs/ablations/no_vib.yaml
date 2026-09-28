@@ -1,0 +1,7 @@
+ablation_name: "no_vib"
+description: "Ablation: Remove Variational Information Bottleneck (deterministic encoder, lambda_vib = 0)"
+overrides:
+  model:
+    stochastic_encoder: false
+  loss:
+    lambda_vib: 0.0

@@ -1,0 +1,5 @@
+method: "weibull_evt_openmax"
+tail_size: 20
+distance_metric: "euclidean"
+alpha_rank: 5
+threshold: 0.5

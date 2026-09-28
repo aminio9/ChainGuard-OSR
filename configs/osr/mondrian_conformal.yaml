@@ -1,0 +1,6 @@
+method: "mondrian_conformal"
+alpha: 0.05
+conformal_type: "class_conditional" # Mondrian class-conditional coverage
+score_function: "1_minus_softmax"
+empty_set_policy: "unknown_zero_day"
+allow_multi_label: true

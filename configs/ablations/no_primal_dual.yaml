@@ -1,0 +1,7 @@
+ablation_name: "no_primal_dual"
+description: "Ablation: Remove Primal-Dual consensus penalty (rho = 0, standard averaging)"
+overrides:
+  loss:
+    primal_dual_rho: 0.0
+  federated:
+    primal_dual_rho: 0.0

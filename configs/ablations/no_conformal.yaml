@@ -1,0 +1,5 @@
+ablation_name: "no_conformal"
+description: "Ablation: Remove Mondrian Conformal Prediction (rely on raw OpenMax EVT threshold)"
+overrides:
+  osr:
+    enable_conformal: false

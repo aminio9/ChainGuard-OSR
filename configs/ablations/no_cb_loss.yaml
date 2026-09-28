@@ -1,0 +1,6 @@
+ablation_name: "no_cb_loss"
+description: "Ablation: Remove Class-Balanced focal loss (use standard Cross-Entropy)"
+overrides:
+  loss:
+    beta_cb: 0.0
+    focal_gamma: 0.0

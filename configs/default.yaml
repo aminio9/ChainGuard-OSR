@@ -1,0 +1,59 @@
+experiment:
+  name: "federated_osr_default"
+  seed: 42
+  device: "auto" # "cuda", "cpu", or "auto"
+  output_dir: "results/runs"
+  checkpoint_dir: "checkpoints"
+  save_checkpoints: true
+  save_frequency: 10
+
+data:
+  dataset_name: "synthetic_p2p" # "b_tat", "b_nat", or "synthetic_p2p"
+  data_dir: "data"
+  in_features: 43
+  num_classes_total: 10
+  known_classes: [0, 1, 2, 3, 4, 5, 6] # C = 7 known classes
+  unknown_classes: [7, 8, 9]           # U = 3 zero-day unknown classes
+  openness: 0.1835                     # Computed via 1 - sqrt(2C / (2C + U))
+  test_split_ratio: 0.2
+  cal_split_ratio: 0.1                 # Calibration set for Conformal Prediction
+
+federated:
+  num_clients: 10
+  client_fraction: 0.5                 # Active fraction per round
+  num_rounds: 100
+  local_epochs: 5
+  batch_size: 128
+  partition:
+    strategy: "dirichlet"              # "dirichlet" or "iid"
+    beta_dirichlet: 0.1                # Extreme non-IID label skew (Beta_D = 0.1)
+
+model:
+  architecture: "vib_dual_branch"
+  in_features: 43
+  latent_dim: 64
+  hidden_dim: 128
+  density_dim: 16
+  dropout: 0.1
+
+optimization:
+  optimizer: "adam"
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  lr_decay_step: 40
+  lr_decay_gamma: 0.5
+
+loss:
+  beta_cb: 0.999                       # Effective number hyperparameter
+  focal_gamma: 2.0                     # Focal modulation parameter
+  lambda_vib: 0.01                     # VIB KL penalty weight
+  lambda_anchor: 0.05                  # Orthogonal anchor penalty weight
+  primal_dual_rho: 0.1                 # Quadratic augmented Lagrangian penalty
+
+osr:
+  weibull_tail_size: 20
+  energy_temperature: 1.0
+  conformal_alpha: 0.05                # 95% guaranteed coverage bound (alpha = 0.05)
+  enable_weibull: true
+  enable_energy: true
+  enable_conformal: true

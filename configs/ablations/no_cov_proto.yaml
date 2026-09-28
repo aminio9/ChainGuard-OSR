@@ -1,0 +1,5 @@
+ablation_name: "no_cov_proto"
+description: "Ablation: Remove Covariance-guided prototype synthesis (use naive arithmetic mean)"
+overrides:
+  federated:
+    covariance_prototype_aggregation: false

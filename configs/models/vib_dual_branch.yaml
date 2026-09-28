@@ -1,0 +1,9 @@
+architecture: "vib_dual_branch"
+in_features: 43
+latent_dim: 64
+hidden_dim: 128
+density_dim: 16
+dropout: 0.1
+use_batchnorm: true
+activation: "relu"
+stochastic_encoder: true
