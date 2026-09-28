@@ -1,47 +1,45 @@
-# Mathematical Methodology to Code Mapping
+# Mathematical Methodology to Code Mapping (Master Reference)
 
 This document provides a line-by-line, formal cross-reference between the theoretical formulation presented in `02_Detailed_Methodology_and_Defense_Document.md` and the implemented Python codebase in `src/`.
 
 ---
 
-## 1. Master Formula Mapping
+## 1. Master Formula Mapping (All 27 Equations)
 
-| Mathematical Object | Mathematical Equation | Implementation File | Python Function / Class |
+| Equation | Mathematical Object & Formal Formulation | Implementation File | Python Function / Class |
 | :--- | :--- | :--- | :--- |
-| **Formula 1: Dirichlet Label Skew** | $\mathbf{p}_k \sim \operatorname{Dir}_C(\beta_D \mathbf{1}_C)$ | `src/data/partitioning.py` | `partition_dirichlet_non_iid()` |
-| **Formula 2: Openness Metric** | $\mathcal{O} = 1 - \sqrt{\frac{2 C_{\mathrm{known}}}{2 C_{\mathrm{known}} + U}}$ | `src/data/osr_split.py` | `compute_openness()` |
-| **Formula 3: Decoupled Branches** | $z = E_\theta(x), \hat{y} = C_\phi(z), h = H_\psi(z)$ | `src/models/dual_branch.py` | `DecoupledDualBranchNetwork` |
-| **Formula 4: Class-Balanced Loss** | $\mathcal{L}_{\mathrm{CB}} = - \frac{1 - \beta_{\mathrm{cb}}}{1 - \beta_{\mathrm{cb}}^{N_y}} (1 - p_y)^\gamma \log p_y$ | `src/losses/class_balanced.py` | `class_balanced_focal_loss()` |
-| **Formula 5 & 6: VIB KL Divergence** | $\mathcal{L}_{\mathrm{VIB}} = \frac{1}{2} \sum (\mu_j^2 + \sigma_j^2 - \log \sigma_j^2 - 1)$ | `src/losses/vib_loss.py` | `vib_kl_divergence_loss()` |
-| **Formula 7: Orthogonal Anchoring** | $\mathcal{L}_{\mathrm{anchor}} = \frac{1}{C(C-1)} \sum_{i \neq j} \|\cos(\mathbf{w}_i, \mathbf{w}_j)\| + \lambda_r \max(0, \|\mathbf{w}_c\| - r_{\max})$ | `src/losses/orthogonal_loss.py` | `orthogonal_anchor_loss()` |
-| **Formula 8: Primal-Dual Penalty** | $\mathcal{L}_{\mathrm{PD}} = \langle \lambda_k, \theta_k - \theta_{\mathrm{global}} \rangle + \frac{\rho}{2} \|\theta_k - \theta_{\mathrm{global}}\|^2$ | `src/losses/primal_dual_loss.py` | `primal_dual_consensus_loss()` |
-| **Formula 9: Composite Local Loss** | $\mathcal{L}_{\mathrm{local}} = \mathcal{L}_{\mathrm{CB}} + \lambda_{\mathrm{vib}} \mathcal{L}_{\mathrm{VIB}} + \lambda_{\mathrm{anchor}} \mathcal{L}_{\mathrm{anchor}} + \mathcal{L}_{\mathrm{PD}}$ | `src/losses/composite_loss.py` | `CompositeLossCalculator` |
-| **Formula 10: Bayesian Covariance Prototype** | $\bar{\mu}_{\mathrm{global}, c} = (\sum \Sigma_{k,c}^{-1})^{-1} \sum \Sigma_{k,c}^{-1} \bar{\mu}_{k,c}$ | `src/aggregation/covariance_proto.py` | `aggregate_prototypes_covariance()` |
-| **Formula 11: Weibull EVT Discounting** | $\omega_c(x) = 1 - \exp(- ((\max(0, d_c - \tau_c)) / \kappa_c)^{\xi_c})$ | `src/osr/weibull_evt.py` | `compute_evt_probabilities()` |
-| **Formula 12: Free Helmholtz Energy** | $E(x; \mathbf{w}) = - T \log \sum \exp(f_c(x) / T)$ | `src/osr/energy_ood.py` | `compute_free_energy_score()` |
-| **Formulas 13-15: Mondrian Conformal** | $s_i = 1 - \hat{p}_{y_i}(x_i), \hat{q}_c, \mathcal{C}_{1-\alpha}(x)$ | `src/osr/conformal.py` | `MondrianConformalCalibrator` |
+| **Eq. 1 & 2** | **Class-Balanced Loss ($\mathcal{L}_{\mathrm{CB}}$):**<br>$\widetilde{w}_c^{(k)} = \frac{(1 - \beta_{\mathrm{cb}}) / (1 - \beta_{\mathrm{cb}}^{n_c^{(k)}})}{\sum_{j \in \mathcal{Y}_k^{\mathrm{local}}} (1 - \beta_{\mathrm{cb}}) / (1 - \beta_{\mathrm{cb}}^{n_j^{(k)}})}$<br>$\mathcal{L}_{\mathrm{CB}} = - \frac{1}{|\mathcal{B}|} \sum_{(x_i, y_i) \in \mathcal{B}} \widetilde{w}_{y_i}^{(k)} \log p_{k, y_i}(x_i)$ | `src/losses/class_balanced.py` | `class_balanced_focal_loss()` |
+| **Eq. 3 & 4** | **VIB Objective ($\mathcal{L}_{\mathrm{VIB}}$):**<br>$q_\theta(z \mid x) = \mathcal{N}(z; \mu(x), \operatorname{diag}(\sigma^2(x)))$<br>$\mathcal{L}_{\mathrm{VIB}} = \frac{1}{2} \sum_{j=1}^{d_z} (\mu_j^2 + \sigma_j^2 - \log \sigma_j^2 - 1)$ | `src/losses/vib_loss.py` | `vib_kl_divergence_loss()` |
+| **Eq. 5** | **Shannon Entropy Certainty Gate:**<br>$U_{\mathrm{anc}}(x) = 1 - \frac{H(p_{\mathrm{anc}}^{(\tau_g)}(x))}{\log |C_K|}$ | `src/losses/anchor_loss.py` | `compute_shannon_certainty()` |
+| **Eq. 6** | **Sigmoid Dynamic Time-Schedule:**<br>$\lambda_{\mathrm{anc}}(x, t) = \lambda_{\mathrm{anc}}^{\max} \cdot \frac{1}{1 + \exp(-\kappa(t/T - t_0))} \cdot U_{\mathrm{anc}}(x)$ | `src/losses/anchor_loss.py` | `compute_anchor_weight()` |
+| **Eq. 7 & 8** | **Dynamic Global Anchor Regularization:**<br>$\mathcal{L}_{\mathrm{anchor}} = \tau_g^2 \cdot D_{\mathrm{KL}}(p_{\mathrm{anc}}^{(\tau_g)}(x) \parallel p_k^{(\tau_g)}(x))$<br>$\frac{\partial [\lambda_{\mathrm{anc}} \mathcal{L}_{\mathrm{anchor}}]}{\partial \ell_{k, c}(x_i)} = \lambda_{\mathrm{anc}} \tau_g (p_{k,c}^{(\tau_g)} - p_{\mathrm{anc},c}^{(\tau_g)}) \neq 0$ | `src/losses/anchor_loss.py` | `DynamicGlobalAnchorLoss` |
+| **Eq. 9** | **Composite Local Objective:**<br>$\min_{w_k} \mathcal{L}_{\mathrm{local}} = \mathcal{L}_{\mathrm{CB}} + \lambda_{\mathrm{vib}} \mathcal{L}_{\mathrm{VIB}} + \lambda_{\mathrm{anc}}(x, t) \mathcal{L}_{\mathrm{anchor}}$ | `src/losses/composite_loss.py` | `CompositeLossCalculator` |
+| **Eq. 10** | **Cosine Annealing Learning Rate:**<br>$\eta_t = \eta_{\min} + \frac{1}{2}(\eta_0 - \eta_{\min})\left(1 + \cos\left(\frac{\pi t}{T}\right)\right)$ | `src/federated/server.py` | `FederatedServer.compute_cosine_learning_rate()` |
+| **Eq. 11** | **FedAvg Global Consensus:**<br>$w^{t+1} = \sum_{k=1}^K \frac{n_k}{N} w_k^{t+1}$ | `src/aggregation/fedavg_agg.py` | `aggregate_fedavg_parameters()` |
+| **Eq. 12 & 13** | **Phase II Sub-Block Local Moments:**<br>$\boldsymbol{\mu}_c^{(k)} = \frac{1}{n_c^{(k)}} \sum z_{k, i}$<br>$\boldsymbol{\Sigma}_{c, \mathcal{G}_b}^{(k)} = \frac{1}{n_c^{(k)}} \sum (z_{k,i}[\mathcal{G}_b] - \boldsymbol{\mu}_{c, \mathcal{G}_b}^{(k)})(z_{k,i}[\mathcal{G}_b] - \boldsymbol{\mu}_{c, \mathcal{G}_b}^{(k)})^\top$ | `src/federated/client.py` | `FederatedClient.extract_phase_two_moments()` |
+| **Eq. 14, 15 & 16** | **Sample-Weighted Byzantine MAD Filter:**<br>$\boldsymbol{\mu}_c^{\mathrm{med}} = \operatorname{median}_{k} \{\boldsymbol{\mu}_c^{(k)}\}, \mathrm{MAD}_c = \operatorname{median}_{k} \{\|\boldsymbol{\mu}_c^{(k)} - \boldsymbol{\mu}_c^{\mathrm{med}}\|_2\}$<br>$\gamma_c(n_c^{(k)}) = \gamma_0 (1 + \zeta / \sqrt{n_c^{(k)}})$<br>$\mathcal{K}_c^{\mathrm{clean}} = \{k \mid \|\boldsymbol{\mu}_c^{(k)} - \boldsymbol{\mu}_c^{\mathrm{med}}\|_2 \le \gamma_c(n_c^{(k)}) \mathrm{MAD}_c\}$ | `src/aggregation/byzantine_mad.py` | `filter_byzantine_moments()` |
+| **Eq. 17 & 18** | **Law of Total Variance Pooled Covariance:**<br>$\boldsymbol{\mu}_c = \frac{1}{N_c} \sum_{k \in \mathcal{K}_c^{\mathrm{clean}}} n_c^{(k)} \boldsymbol{\mu}_c^{(k)}$<br>$\boldsymbol{\Sigma}_{c, \mathcal{G}_b} = \frac{1}{N_c} \sum_{k \in \mathcal{K}_c^{\mathrm{clean}}} n_c^{(k)} [\boldsymbol{\Sigma}_{c, \mathcal{G}_b}^{(k)} + (\boldsymbol{\mu}_c^{(k)}[\mathcal{G}_b] - \boldsymbol{\mu}_c[\mathcal{G}_b])(\boldsymbol{\mu}_c^{(k)}[\mathcal{G}_b] - \boldsymbol{\mu}_c[\mathcal{G}_b])^\top] + \epsilon_v \mathbf{I}_{d_b}$ | `src/aggregation/total_variance.py` | `aggregate_total_variance_moments()` |
+| **Eq. 19** | **Wire-Speed Block-Diagonal Mahalanobis Distance:**<br>$D_{\mathrm{block}}(z, c) = \sum_{b=1}^B (z[\mathcal{G}_b] - \boldsymbol{\mu}_c[\mathcal{G}_b])^\top (\boldsymbol{\Sigma}_{c, \mathcal{G}_b})^{-1} (z[\mathcal{G}_b] - \boldsymbol{\mu}_c[\mathcal{G}_b])$ | `src/osr/block_mahalanobis.py` | `compute_block_mahalanobis_distances()` |
+| **Eq. 20 & 21** | **Candidate Class & Nonconformity Score:**<br>$\widehat{c}(x_{\mathrm{test}}) = \arg\min_{c \in C_K} D_{\mathrm{block}}(z, c)$<br>$S(x_{\mathrm{test}}) = D_{\mathrm{block}}(z, \widehat{c}(x_{\mathrm{test}}))$ | `src/osr/block_mahalanobis.py` | `WireSpeedEdgeDetector.predict_sample()` |
+| **Eq. 22 & 23** | **Distributed Mondrian Conformal Quantiles:**<br>$q_k^{(1-\alpha)}(c) = \operatorname{Quantile}(\mathcal{S}_{\mathrm{cal}, k}^c, \frac{\lceil(n+1)(1-\alpha)\rceil}{n})$<br>$\tau_{\alpha, c} = \sum_{k \in \mathcal{K}_c} \frac{n_{\mathrm{cal}, c}^{(k)}}{N_{\mathrm{cal}, c}} q_k^{(1 - \alpha)}(c)$ | `src/osr/conformal.py` | `compute_finite_sample_quantile()`, `aggregate_distributed_quantiles()` |
+| **Eq. 24 & 25** | **Finite-Sample Coverage Guarantee (Theorem 2):**<br>$\mathbb{P}(S(X_{\mathrm{test}}) > \tau_{\alpha, c} \mid Y_{\mathrm{test}} = c) \le \alpha$ | `src/metrics/conformal_metrics.py` | `compute_conformal_metrics()` |
+| **Eq. 26** | **EVT Zero-Day Power Bound (Theorem 3):**<br>$\mathbb{P}(f_{\mathrm{OSR}}(X) \neq \mathrm{Unknown} \mid X \sim u) \le \exp(- ((\Delta_{\min} - \tau_{\alpha, \widehat{c}}) / \sigma)^{\xi})$ | `src/osr/weibull_evt.py` | `WeibullEVTFitter` |
+| **Eq. 27** | **Operational Decision Rule (Algorithm 2 Line 7-10):**<br>$f_{\mathrm{OSR}}(x) = \begin{cases} \mathrm{Unknown} & \text{if } S(x) > \tau_{\alpha, \widehat{c}} \\ \widehat{c} & \text{otherwise} \end{cases}$ | `src/osr/block_mahalanobis.py` | `WireSpeedEdgeDetector` |
 
 ---
 
-## 2. Algorithms Mapping
+## 2. Formal Theoretical Theorems Mapping
 
-### Algorithm 1: Federated Training & Consensus
-* **Lines 1-5 (Initialization & Client Sampling):** `src/federated/server.py` (`FederatedServer.__init__` and `select_active_clients`)
-* **Lines 6-11 (Local Epochs, Stochastic VIB pass, Prototype Extraction):** `src/federated/client.py` (`FederatedClient.train_local`)
-* **Line 12 (Parameter FedAvg Aggregation):** `src/aggregation/fedavg_agg.py` (`aggregate_fedavg_parameters`)
-* **Line 13 (Dual Multiplier Updates):** `src/aggregation/primal_dual_agg.py` (`update_dual_multipliers`)
-* **Line 14 (Bayesian Covariance Prototype Synthesis):** `src/aggregation/covariance_proto.py` (`aggregate_prototypes_covariance`)
+1. **Theorem 1 (Algebraic Exactness of Pooled Moments & Byzantine Robustness):**
+   - *Statement:* Without raw feature exchange ($I(D_k; \mathcal{M}_k) = 0$), the pooled covariance matches centralized sample covariance under arbitrary label skew, and any malicious node with $\|\boldsymbol{\mu}_c^{(m)}\| \to \infty$ is filtered with probability $1$.
+   - *Implemented in:* `src/aggregation/total_variance.py` and `src/aggregation/byzantine_mad.py`.
+   - *Tested in:* `tests/test_total_variance.py` (`test_law_of_total_variance_exactness` passes with machine precision atol=$10^{-5}$).
 
-### Algorithm 2: Real-Time Edge Inference
-* **Lines 1-3 (Flow Normalization & Latent Forward Pass $z = \mu(x)$):** `src/osr/edge_inference.py` (`EdgeInferenceEngine.predict_flow`)
-* **Line 4 (Logits & Free Energy Score):** `src/osr/energy_ood.py` (`compute_free_energy_score`)
-* **Line 5 (EVT Weibull Distance Discounting):** `src/osr/weibull_evt.py` (`compute_evt_probabilities`)
-* **Line 6 (Mondrian Conformal Prediction Set Construction):** `src/osr/conformal.py` (`MondrianConformalCalibrator.predict_conformal_sets`)
-* **Lines 7-8 (Alert Trigger on $\mathcal{C} = \emptyset$ vs Argmax Output):** `src/osr/edge_inference.py` (decision branching)
+2. **Theorem 2 (Class-Conditional Mondrian Finite-Sample Coverage Guarantee):**
+   - *Statement:* False alarm rate on known traffic satisfies $\mathbb{P}(f_{\mathrm{OSR}}(X) = \mathrm{Unknown} \mid Y = c) \le \alpha$ for all $c \in C_K$.
+   - *Implemented in:* `src/osr/conformal.py`.
+   - *Tested in:* `tests/test_osr_conformal.py`.
 
----
-
-## 3. Theoretical Guarantees Mapping
-
-* **Theorem 1 (Asymptotic Convergence Bound):** Bounded dissimilarity and quadratic penalty $\rho$ in `src/losses/primal_dual_loss.py`.
-* **Theorem 2 (Finite-Sample False Alarm Rate Bound):** $\mathbb{P}(\mathcal{C}_{1-\alpha}(X) = \emptyset \mid \text{Known}) \le \alpha$, empirically calibrated in `src/osr/conformal.py` and validated in `src/metrics/conformal_metrics.py`.
+3. **Theorem 3 (Neyman-Pearson Zero-Day Power Bound via EVT):**
+   - *Statement:* Escape probability of unseen attacks decays exponentially as the semantic distance to known clusters increases.
+   - *Implemented in:* `src/osr/weibull_evt.py`.

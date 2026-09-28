@@ -55,6 +55,11 @@ class FederatedConfig(BaseModel):
     covariance_prototype_aggregation: bool = True
     share_classifier_head: bool = False
     fedprox_mu: float = 0.0
+    num_blocks: int = 4
+    block_dim: int = 16
+    mad_gamma_0: float = 3.0
+    mad_zeta: float = 1.5
+    tikhonov_eps: float = 1e-4
     partition: PartitionConfig = Field(default_factory=PartitionConfig)
 
 
@@ -84,6 +89,10 @@ class LossConfig(BaseModel):
     lambda_vib: float = 0.01
     lambda_anchor: float = 0.05
     primal_dual_rho: float = 0.1
+    tau_g: float = 2.0
+    max_lambda_anchor: float = 1.0
+    anchor_kappa: float = 10.0
+    anchor_t0: float = 0.25
 
 
 class OSRConfig(BaseModel):
@@ -94,6 +103,7 @@ class OSRConfig(BaseModel):
     enable_weibull: bool = True
     enable_energy: bool = True
     enable_conformal: bool = True
+    enable_block_mahalanobis: bool = True
     msp_threshold: float = 0.5
 
 

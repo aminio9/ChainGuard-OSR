@@ -1,3 +1,13 @@
+"""Complete 3-Phase Federated Open-Set Recognition Experiment (Algorithms 1 & 2).
+
+Executes:
+  - Phase I: Representation Learning with Drift Control & Cosine Annealing (Equations 1-11)
+  - Phase II: Byzantine-Robust Class Profiling via Law of Total Variance (Equations 12-18 & 22-23)
+  - Phase III: Wire-Speed Conformal Edge Detection with Block-Diagonal Mahalanobis (Equations 19-21 & 26-27)
+"""
+
+from __future__ import annotations
+
 import argparse
 import sys
 from pathlib import Path
@@ -24,6 +34,7 @@ from src.federated.server import FederatedServer
 from src.osr.weibull_evt import WeibullEVTFitter
 from src.osr.conformal import MondrianConformalCalibrator
 from src.osr.edge_inference import EdgeInferenceEngine
+from src.osr.block_mahalanobis import WireSpeedEdgeDetector
 from src.metrics.classification import compute_classification_metrics
 from src.metrics.osr_metrics import compute_osr_metrics
 from src.metrics.conformal_metrics import compute_conformal_metrics
@@ -47,7 +58,7 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
     logger = setup_logger(name="fl_osr", log_dir=tracker.run_dir)
     checkpoint_mgr = CheckpointManager(checkpoint_dir=config.experiment.checkpoint_dir)
 
-    logger.info("Initializing Federated OSR Experiment")
+    logger.info("Initializing 3-Phase Federated OSR Experiment (Algorithms 1 & 2)")
     logger.info(f"Target Device: {device} | Dirichlet Beta: {config.federated.partition.beta_dirichlet}")
     tracker.initialize_run(config.model_dump())
 
@@ -80,7 +91,7 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
         f"Test Closed={len(test_closed_ds)}, Test Open={len(test_open_ds)}"
     )
 
-    # 4. Dirichlet Non-IID Partition across clients (Formula 1)
+    # 4. Dirichlet Non-IID Partition across clients
     client_indices = partition_dirichlet_non_iid(
         dataset=train_ds,
         num_clients=config.federated.num_clients,
@@ -93,14 +104,16 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
         sub_indices = client_indices[client_id]
         idx_tensor = torch.tensor(sub_indices, dtype=torch.long)
         sub_dataset = FlowDataset(train_ds.features[idx_tensor], train_ds.labels[idx_tensor])
-        client = FederatedClient(client_id, sub_dataset, config, device)
+        client = FederatedClient(client_id, sub_dataset, config, device, cal_dataset=cal_ds)
         clients.append(client)
 
     server = FederatedServer(config, clients, device)
 
-    # 5. Federated Training Loop (Algorithm 1)
+    # =========================================================================
+    # PHASE I: Representation Learning with Drift Control (Equations 1-11)
+    # =========================================================================
     num_rounds = config.federated.num_rounds
-    logger.info(f"Starting {num_rounds} communication rounds...")
+    logger.info(f"--- [Phase I] Starting {num_rounds} communication rounds with Cosine Annealed SGD & Anchor Gating ---")
 
     for r in range(1, num_rounds + 1):
         round_loss = server.run_round(r)
@@ -109,7 +122,8 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
         if r % 10 == 0 or r == num_rounds:
             logger.info(
                 f"Round [{r:03d}/{num_rounds:03d}] | Total Loss: {round_loss.get('loss_total', 0.0):.4f} "
-                f"| CB Loss: {round_loss.get('loss_cb', 0.0):.4f} | VIB Loss: {round_loss.get('loss_vib', 0.0):.4f}"
+                f"| CB Loss: {round_loss.get('loss_cb', 0.0):.4f} | VIB Loss: {round_loss.get('loss_vib', 0.0):.4f} "
+                f"| Anchor Loss: {round_loss.get('loss_anchor', 0.0):.4f} | LR: {round_loss.get('lr_scheduled', 0.0):.6f}"
             )
             if config.experiment.save_checkpoints:
                 checkpoint_mgr.save_checkpoint(
@@ -119,8 +133,54 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
                     global_prototypes=server.global_prototypes,
                 )
 
-    # 6. Fit Weibull EVT Meta-Recognition Models (Formula 11)
-    logger.info("Fitting Weibull EVT distributions on training feature tails...")
+    # Freeze Global Encoder permanently: theta_g^* = theta_g^T (Algorithm 1 Line 7)
+    server.freeze_global_encoder()
+    logger.info("--- [Phase I Completed] Global encoder theta_g^* frozen permanently ---")
+
+    # =========================================================================
+    # PHASE II: Byzantine-Robust Profiling via Law of Total Variance (Equations 12-18)
+    # =========================================================================
+    logger.info("--- [Phase II] Extracting sub-block moments and running Byzantine MAD + Total Variance aggregation ---")
+    global_profiles = server.run_phase_two_profiling(
+        num_blocks=config.federated.num_blocks,
+        block_dim=config.federated.block_dim,
+        alpha=config.osr.conformal_alpha,
+        apply_mad_filter=True,
+        mad_gamma_0=config.federated.mad_gamma_0,
+        mad_zeta=config.federated.mad_zeta,
+    )
+    logger.info(f"Synthesized exact global profiles for {len(global_profiles)} known classes via Theorem 1")
+
+    # =========================================================================
+    # PHASE III: Wire-Speed Conformal Edge Detection (Algorithm 2)
+    # =========================================================================
+    logger.info("--- [Phase III] Evaluating Wire-Speed Block-Diagonal Mahalanobis Edge Detector (Algorithm 2) ---")
+    num_known = len(config.data.known_classes)
+    edge_detector = server.get_edge_detector(
+        unknown_label=num_known,
+        num_blocks=config.federated.num_blocks,
+        block_dim=config.federated.block_dim,
+    )
+
+    preds_wire, is_unk_wire, cand_wire, dist_scores_wire = edge_detector.predict_batch(test_open_ds.features)
+    y_test_true = test_open_ds.labels.numpy()
+
+    # Metrics for Wire-Speed Block-Diagonal Mahalanobis
+    mahalanobis_osr_metrics = compute_osr_metrics(
+        y_true=y_test_true,
+        y_pred=preds_wire,
+        anomaly_scores=dist_scores_wire,
+        num_known_classes=num_known,
+        unknown_label=num_known,
+    )
+
+    logger.info("=== Wire-Speed Block-Diagonal Mahalanobis Evaluation (Phase III) ===")
+    logger.info(f"Open-Set AUROC (Mahalanobis): {mahalanobis_osr_metrics['auroc'] * 100.0:.2f}%")
+    logger.info(f"Open-Set Macro F1: {mahalanobis_osr_metrics['open_set_macro_f1'] * 100.0:.2f}%")
+    logger.info(f"False Alarm Rate (FAR): {mahalanobis_osr_metrics['false_alarm_rate'] * 100.0:.2f}% (Nominal Bound <= {config.osr.conformal_alpha * 100:.1f}%)")
+
+    # Baseline multi-stage evaluation (Weibull EVT + Energy + Conformal)
+    logger.info("Evaluating baseline multi-stage engine for comparison...")
     weibull_fitter = WeibullEVTFitter(tail_size=config.osr.weibull_tail_size)
     weibull_fitter.fit(
         features=train_ds.features,
@@ -129,13 +189,8 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
         model=server.global_model,
     )
 
-    # 7. Mondrian Conformal Prediction Calibration (Formulas 13 & 14)
-    logger.info("Calibrating Mondrian Conformal Prediction quantiles...")
     cal_loader = torch.utils.data.DataLoader(cal_ds, batch_size=256, shuffle=False)
-    server.global_model.eval()
-
-    cal_probs_list = []
-    cal_labels_list = []
+    cal_probs_list, cal_labels_list = [], []
     with torch.no_grad():
         for x_b, y_b in cal_loader:
             logits, _, _, _, _ = server.global_model(x_b.to(device))
@@ -150,26 +205,20 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
     conformal_calibrator.calibrate(
         cal_probabilities=all_cal_probs,
         cal_labels=all_cal_labels,
-        num_classes=len(config.data.known_classes),
+        num_classes=num_known,
     )
 
-    # 8. Hierarchical Edge Inference Evaluation (Algorithm 2)
-    logger.info("Evaluating Open-Set Inference on un-seen and zero-day traffic...")
     engine = EdgeInferenceEngine(
         model=server.global_model,
         prototypes=server.global_prototypes,
         weibull_models=weibull_fitter.weibull_models,
         conformal_calibrator=conformal_calibrator,
-        unknown_class_id=len(config.data.known_classes),
+        unknown_class_id=num_known,
         energy_temperature=config.osr.energy_temperature,
     )
 
     preds, conf_sets, energies, unknown_probs = engine.predict_batch(test_open_ds.features)
-    y_test_true = test_open_ds.labels.numpy()
-
-    # 9. Compute Metrics
-    num_known = len(config.data.known_classes)
-    osr_metrics = compute_osr_metrics(
+    baseline_osr_metrics = compute_osr_metrics(
         y_true=y_test_true,
         y_pred=preds,
         anomaly_scores=unknown_probs,
@@ -183,19 +232,16 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
         target_coverage=1.0 - config.osr.conformal_alpha,
     )
 
-    logger.info("=== Final Evaluation Results ===")
-    logger.info(f"Open-Set AUROC: {osr_metrics['auroc'] * 100.0:.2f}%")
-    logger.info(f"Open-Set Macro F1: {osr_metrics['open_set_macro_f1'] * 100.0:.2f}%")
-    logger.info(f"False Alarm Rate (FAR): {osr_metrics['false_alarm_rate'] * 100.0:.2f}% (Nominal Bound <= {config.osr.conformal_alpha * 100:.1f}%)")
-    logger.info(f"Conformal Empirical Coverage: {conformal_eval['empirical_coverage'] * 100.0:.2f}%")
-    logger.info(f"Average Prediction Set Size: {conformal_eval['average_set_size']:.2f}")
-
     final_results = {
-        **osr_metrics,
-        **conformal_eval,
+        "mahalanobis_auroc": mahalanobis_osr_metrics["auroc"],
+        "mahalanobis_f1": mahalanobis_osr_metrics["open_set_macro_f1"],
+        "mahalanobis_far": mahalanobis_osr_metrics["false_alarm_rate"],
+        "baseline_auroc": baseline_osr_metrics["auroc"],
+        "baseline_f1": baseline_osr_metrics["open_set_macro_f1"],
+        "conformal_empirical_coverage": conformal_eval["empirical_coverage"],
     }
 
-    # 10. Persist Artifacts and Plots
+    # Persist Artifacts and Plots
     tracker.finish_run(final_results=final_results)
     plot_convergence_curves(tracker.history, tracker.run_dir / "convergence.png")
     plot_conformal_set_distribution(conf_sets, tracker.run_dir / "conformal_distribution.png")
@@ -203,7 +249,7 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Federated OSR Experiment")
+    parser = argparse.ArgumentParser(description="Run 3-Phase Federated OSR Experiment")
     parser.add_argument("--config", type=str, default="configs/default.yaml", help="Path to YAML config")
     parser.add_argument("--rounds", type=int, default=None, help="Override number of rounds")
     args = parser.parse_args()
