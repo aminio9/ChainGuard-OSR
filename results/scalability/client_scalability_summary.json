@@ -1,0 +1,41 @@
+{
+  "K_10": {
+    "num_clients": 10,
+    "auroc": 0.8314950000000001,
+    "aupr": 0.8207442464096564,
+    "unknown_recall": 0.164,
+    "unknown_f1": 0.27891156462585037,
+    "open_set_macro_f1": 0.6183452408749598,
+    "kfr": 0.015,
+    "closed_accuracy": 0.8475,
+    "stage1_time_sec": 0.7530518999992637,
+    "stage2_time_sec": 10.885660799991456,
+    "total_time_sec": 11.63871269999072
+  },
+  "K_50": {
+    "num_clients": 50,
+    "auroc": 0.858165,
+    "aupr": 0.8394085699516198,
+    "unknown_recall": 0.112,
+    "unknown_f1": 0.19964349376114085,
+    "open_set_macro_f1": 0.6150339205873434,
+    "kfr": 0.0125,
+    "closed_accuracy": 0.8725,
+    "stage1_time_sec": 4.43725760000234,
+    "stage2_time_sec": 34.27045690000523,
+    "total_time_sec": 38.70771450000757
+  },
+  "K_100": {
+    "num_clients": 100,
+    "auroc": 0.813845,
+    "aupr": 0.7845797544701387,
+    "unknown_recall": 0.038,
+    "unknown_f1": 0.07265774378585087,
+    "open_set_macro_f1": 0.5740728587757078,
+    "kfr": 0.01,
+    "closed_accuracy": 0.8525,
+    "stage1_time_sec": 3.9581833999982337,
+    "stage2_time_sec": 55.17204619999393,
+    "total_time_sec": 59.13022959999216
+  }
+}
