@@ -216,6 +216,7 @@ class FederatedServer:
         apply_mad_filter: bool = True,
         mad_gamma_0: float = 3.0,
         mad_zeta: float = 1.5,
+        cal_dataset: Optional[Any] = None,
     ) -> Dict[int, GlobalClassProfile]:
         """Execute Phase II: Byzantine-Robust Profiling via Law of Total Variance (Algorithm 1 Lines 17-27).
 
@@ -257,6 +258,47 @@ class FederatedServer:
             mad_gamma_0=mad_gamma_0,
             mad_zeta=mad_zeta,
         )
+
+        # Global Conformal Calibration (Section 4.4 & 5.4: D_cal against pooled profiles)
+        if cal_dataset is not None:
+            cal_ds = cal_dataset
+        elif any(getattr(c, "cal_dataset", None) is not None for c in self.clients):
+            cal_ds = next(c.cal_dataset for c in self.clients if getattr(c, "cal_dataset", None) is not None)
+        else:
+            cal_ds = None
+
+        if cal_ds is not None and len(cal_ds) > 0:
+            from torch.utils.data import DataLoader
+            from src.osr.block_mahalanobis import compute_block_mahalanobis_distances
+            from src.osr.conformal import compute_finite_sample_quantile
+
+            loader = DataLoader(cal_ds, batch_size=256, shuffle=False)
+            all_cal_z = []
+            all_cal_y = []
+            with torch.no_grad():
+                for cx, cy in loader:
+                    cx_dev = cx.to(self.device)
+                    cout = self.global_model.encoder(cx_dev)
+                    c_mu = cout[3] if isinstance(cout, tuple) and len(cout) >= 4 else (cout[0] if isinstance(cout, tuple) else cout)
+                    all_cal_z.append(c_mu)
+                    all_cal_y.append(cy.to(self.device))
+
+            cal_z_all = torch.cat(all_cal_z, dim=0)
+            cal_y_all = torch.cat(all_cal_y, dim=0)
+
+            class_dists = compute_block_mahalanobis_distances(
+                cal_z_all,
+                self.global_profiles,
+                num_blocks=num_blocks,
+                block_dim=block_dim,
+            )
+
+            for c, profile in list(self.global_profiles.items()):
+                c_mask = (cal_y_all == c)
+                if int(c_mask.sum().item()) > 0:
+                    c_scores = class_dists[c][c_mask]
+                    new_tau = float(compute_finite_sample_quantile(c_scores, alpha=alpha))
+                    self.global_profiles[c] = profile._replace(conformal_threshold=new_tau)
 
         return self.global_profiles
 

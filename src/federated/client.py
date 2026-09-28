@@ -130,11 +130,15 @@ class FederatedClient:
         epochs = epochs or self.config.federated.local_epochs
         batch_size = batch_size or self.config.federated.batch_size
 
-        loader = DataLoader(self.dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+        drop_last = len(self.dataset) > batch_size
+        loader = DataLoader(self.dataset, batch_size=batch_size, shuffle=True, drop_last=drop_last)
         epoch_losses: List[Dict[str, float]] = []
 
         for _ in range(epochs):
             for x_batch, y_batch in loader:
+                if x_batch.size(0) <= 1:
+                    continue  # BatchNorm requires batch_size > 1 to compute running variance
+
                 x_b = x_batch.to(self.device)
                 y_b = y_batch.to(self.device)
 
