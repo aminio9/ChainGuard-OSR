@@ -26,8 +26,7 @@ class CompositeLossCalculator:
         self.dynamic_anchor = DynamicGlobalAnchorLoss(
             tau_g=getattr(config, "tau_g", 2.0),
             max_lambda=getattr(config, "max_lambda_anchor", config.lambda_anchor if config.lambda_anchor > 0 else 1.0),
-            kappa=getattr(config, "anchor_kappa", 10.0),
-            t0=getattr(config, "anchor_t0", 0.25),
+            rho_warm=getattr(config, "rho_warm", getattr(config, "anchor_t0", 0.15)),
         )
 
     def __call__(
@@ -90,18 +89,15 @@ class CompositeLossCalculator:
             l_anchor = torch.tensor(0.0, device=logits.device)
             anchor_loss_weighted = torch.tensor(0.0, device=logits.device)
 
-        # 4. Primal-Dual Augmented Lagrangian Consensus (Optional constraint term)
-        if (
-            self.config.primal_dual_rho > 0.0
-            and local_encoder is not None
-            and global_encoder_params is not None
-            and dual_lambda is not None
-        ):
+        # 4. Primal-Dual Augmented Lagrangian Consensus OR FedProx Proximal Penalty (LaTeX Section 5.3)
+        eff_rho = max(self.config.primal_dual_rho, getattr(self.config, "fedprox_mu", 0.0))
+        if eff_rho > 0.0 and local_encoder is not None and global_encoder_params is not None:
+            effective_lambda = dual_lambda if dual_lambda is not None else torch.zeros(1, device=logits.device)
             l_pd = primal_dual_consensus_loss(
                 local_encoder,
                 global_encoder_params,
-                dual_lambda,
-                rho=self.config.primal_dual_rho,
+                effective_lambda,
+                rho=eff_rho,
             )
         else:
             l_pd = torch.tensor(0.0, device=logits.device)

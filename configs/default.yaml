@@ -21,42 +21,45 @@ data:
 federated:
   num_clients: 10
   client_fraction: 0.5                 # Active fraction per round
-  num_rounds: 100
-  local_epochs: 5
-  batch_size: 128
-  num_blocks: 4                        # B = 4 diagonal sub-blocks (Equations 12 & 19)
-  block_dim: 16                        # d_b = 16 sub-block dimension (64 = 4 * 16)
-  mad_gamma_0: 3.0                     # Byzantine MAD multiplier gamma_0 (Equation 15)
-  mad_zeta: 1.5                        # Sample-size adaptation factor zeta (Equation 15)
-  tikhonov_eps: 0.0001                 # Tikhonov stabilizer epsilon_v = 1e-4 (Equation 18)
+  num_rounds: 100                      # T = 100 global rounds
+  local_epochs: 2                      # E = 2 local epochs per round (Section 5.3)
+  batch_size: 64                       # B_s = 64 mini-batch size (Section 5.3)
+  num_blocks: 8                        # B = 8 diagonal sub-blocks (Section 4.3: d_b = 8)
+  block_dim: 8                         # d_b = 8 sub-block dimension (64 = 8 * 8)
+  mad_gamma_0: 3.0                     # Byzantine MAD multiplier gamma_0 (Equation 148)
+  mad_zeta: 1.5                        # Sample-size adaptation factor zeta (Equation 148)
+  tikhonov_eps: 0.00001                # Tikhonov stabilizer epsilon_v = 1e-5 (Equation 167)
   partition:
     strategy: "dirichlet"              # "dirichlet" or "iid"
-    beta_dirichlet: 0.1                # Extreme non-IID label skew (Beta_D = 0.1)
+    beta_dirichlet: 0.1                # Extreme non-IID label skew (alpha_D = 0.1)
 
 model:
   architecture: "vib_dual_branch"
   in_features: 43
-  latent_dim: 64
-  hidden_dim: 128
+  latent_dim: 64                       # d_z = 64 bottleneck dimension
+  hidden_dim: 128                      # Configurable MLP backbone (Section 5.3)
   density_dim: 16
   dropout: 0.1
 
 optimization:
-  optimizer: "sgd"                     # SGD with Cosine Annealing (Equations 10-11)
-  learning_rate: 0.01                  # eta_0 = 0.01
+  optimizer: "adam"                    # Adam with Cosine Annealing (Section 5.3)
+  learning_rate: 0.001                 # eta_0 = 10^-3 (Section 5.3)
+  eta_min: 0.000001                    # eta_min = 10^-6 (Section 5.3)
   weight_decay: 0.0001
+  clip_grad_norm: 1.0                  # Gradient clipping at 1.0 (Section 5.3)
   lr_decay_step: 40
   lr_decay_gamma: 0.5
 
 loss:
-  beta_cb: 0.999                       # Effective number hyperparameter (Equation 1)
+  beta_cb: 0.999                       # Effective number hyperparameter (Equation 32)
   focal_gamma: 2.0                     # Focal modulation parameter
-  lambda_vib: 0.001                    # VIB KL penalty weight (lambda_vib = 1e-3)
+  lambda_vib: 0.01                     # VIB KL penalty weight (Section 4.1.4: lambda_vib = 0.01)
   lambda_anchor: 1.0                   # Anchor penalty ceiling lambda_anc^max
-  tau_g: 2.0                           # Distillation temperature tau_g (Equation 5)
-  max_lambda_anchor: 1.0               # Peak penalty ceiling (Equation 6)
-  anchor_kappa: 10.0                   # Sigmoid steepness kappa (Equation 6)
-  anchor_t0: 0.25                      # Inflection point round ratio t0 (Equation 6)
+  tau_g: 2.0                           # Distillation temperature tau_g = 2.0 (Equation 67)
+  max_lambda_anchor: 1.0               # Peak penalty ceiling (Equation 72)
+  anchor_kappa: 10.0                   # Sigmoid steepness kappa = 10 (Equation 74)
+  rho_warm: 0.15                       # Warm-up fraction rho_warm = 0.15 (Equation 74)
+  anchor_t0: 0.15                      # Alias for rho_warm
   primal_dual_rho: 0.1                 # Quadratic augmented Lagrangian penalty
 
 osr:

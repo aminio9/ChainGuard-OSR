@@ -46,6 +46,8 @@ class FederatedClient:
             density_dim=config.model.density_dim,
             dropout=config.model.dropout,
             use_batchnorm=config.model.use_batchnorm,
+            use_layernorm=getattr(config.model, "use_layernorm", False),
+            activation=getattr(config.model, "activation", "relu"),
             stochastic_encoder=config.model.stochastic_encoder,
         ).to(self.device)
 
@@ -87,14 +89,24 @@ class FederatedClient:
         self,
         global_encoder_params: Dict[str, torch.Tensor],
         dual_lambda: Optional[torch.Tensor] = None,
+        global_classifier_params: Optional[Dict[str, torch.Tensor]] = None,
     ) -> None:
-        """Receive global encoder parameters and dual variable from orchestrator (Algorithm 1 Line 5)."""
+        """Receive global encoder parameters, dual variable, and optional classifier head from orchestrator (Algorithm 1 Line 5)."""
         self.model.set_encoder_parameters(global_encoder_params)
         self.global_encoder_params = {
             k: v.clone().to(self.device) for k, v in global_encoder_params.items()
         }
         if dual_lambda is not None:
             self.dual_lambda = dual_lambda.clone().to(self.device)
+        if global_classifier_params is not None and (
+            getattr(self.config.federated, "share_classifier_head", False)
+            or self.config.federated.algorithm in ["fedavg", "fedprox"]
+        ):
+            self.model.classifier.load_state_dict(global_classifier_params)
+
+    def get_classifier_parameters(self) -> Dict[str, torch.Tensor]:
+        """Extract classifier head state dictionary for federated parameter exchange."""
+        return {k: v.clone() for k, v in self.model.classifier.state_dict().items()}
 
     def train_local(
         self,
@@ -155,8 +167,8 @@ class FederatedClient:
                 )
 
                 total_loss.backward()
-                # Gradient clipping for numerical stability
-                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=5.0)
+                # Gradient clipping for numerical stability (Section 5.3: max_norm=1.0)
+                nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
                 epoch_losses.append(breakdown)

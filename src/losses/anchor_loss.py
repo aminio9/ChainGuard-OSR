@@ -59,25 +59,28 @@ def compute_anchor_weight(
     t_ratio: float,
     max_lambda: float = 1.0,
     kappa: float = 10.0,
-    t0: float = 0.25,
+    rho_warm: float = 0.15,
+    t0: Optional[float] = None,
 ) -> torch.Tensor:
-    """Compute dynamic sample-wise anchor weight lambda_anc(x, t) (Equation 6).
+    """Compute dynamic sample-wise anchor weight lambda_anc(x, t) (LaTeX Equation 73).
 
-    Mathematical Formulation (Equation 6):
-        lambda_anc(x, t) = lambda_anc^{max} * ( 1 / (1 + exp(-kappa * (t/T - t0))) ) * U_anc(x)
+    Mathematical Formulation (LaTeX Equation 73):
+        lambda_anc(x, t) = lambda_anc^{max} * ( 1 / (1 + exp(-kappa * (t/T - rho_warm))) ) * U_anc(x)
 
     Args:
         u_anc: Tensor of shape (batch_size,) representing certainty values.
         t_ratio: Progression ratio t / T in [0, 1].
         max_lambda: Peak penalty ceiling lambda_anc^{max} (default: 1.0).
         kappa: Sigmoid steepness parameter kappa (default: 10.0).
-        t0: Inflection round ratio t0 (default: 0.25).
+        rho_warm: Warm-up fraction parameter rho_warm (default: 0.15).
+        t0: Optional legacy alias for rho_warm.
 
     Returns:
         Tensor of shape (batch_size,) with adaptive anchor weights.
     """
+    warmup = t0 if t0 is not None else rho_warm
     # Sigmoid progression factor
-    sigmoid_arg = -kappa * (float(t_ratio) - t0)
+    sigmoid_arg = -kappa * (float(t_ratio) - warmup)
     # Numerical clip to avoid overflow
     sigmoid_arg = max(min(sigmoid_arg, 50.0), -50.0)
     time_ramp = 1.0 / (1.0 + math.exp(sigmoid_arg))
@@ -86,7 +89,7 @@ def compute_anchor_weight(
 
 
 class DynamicGlobalAnchorLoss(nn.Module):
-    """Dynamic Global Anchor Regularization with Shannon Entropy Gating (Equations 5-8).
+    """Dynamic Global Anchor Regularization with Shannon Entropy Gating (Equations 5-8 & LaTeX Eq. 66-78).
 
     Enforces non-zero gradients for missing local classes:
         d [lambda_anc * L_anchor] / d ell_{k, c}(x) = lambda_anc(x, t) * tau_g * (p_{k,c}^{(tau_g)} - p_{anc,c}^{(tau_g)}) != 0
@@ -97,14 +100,16 @@ class DynamicGlobalAnchorLoss(nn.Module):
         tau_g: float = 2.0,
         max_lambda: float = 1.0,
         kappa: float = 10.0,
-        t0: float = 0.25,
+        rho_warm: float = 0.15,
+        t0: Optional[float] = None,
         eps: float = 1e-8,
     ) -> None:
         super().__init__()
         self.tau_g = tau_g
         self.max_lambda = max_lambda
         self.kappa = kappa
-        self.t0 = t0
+        self.rho_warm = t0 if t0 is not None else rho_warm
+        self.t0 = self.rho_warm
         self.eps = eps
 
     def forward(

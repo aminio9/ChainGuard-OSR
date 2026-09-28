@@ -1,4 +1,4 @@
-"""Unit tests for Sample-Weighted MAD Byzantine Filter and Law of Total Variance (Theorem 1, Equations 14-18)."""
+"""Unit tests for Sample-Weighted MAD Byzantine Filter and Law of Total Variance (Theorem 1, Equations 14-18 & LaTeX Eq. 151-167)."""
 
 import pytest
 import torch
@@ -30,6 +30,32 @@ def test_byzantine_mad_rejection():
     assert len(clean) == 5
     for c in clean:
         assert c.client_id != 99
+
+
+def test_byzantine_variance_explosion_rejection():
+    """Verify Theorem 1 Part 2 & Eq. 153: Arbitrary covariance trace explosion triggers Byzantine rejection."""
+    d_z = 64
+    d_b = 16
+    honest_mean = torch.zeros(d_z)
+    dummy_covs = [torch.eye(d_b) for _ in range(4)]
+    # Exploded covariance attacker: Tr(Sigma) -> 100000
+    exploded_covs = [torch.eye(d_b) * 10000.0 for _ in range(4)]
+
+    submissions = [
+        ClientClassMoment(client_id=0, sample_count=100, mu=honest_mean + 0.01 * torch.randn(d_z), block_covs=dummy_covs),
+        ClientClassMoment(client_id=1, sample_count=80, mu=honest_mean + 0.01 * torch.randn(d_z), block_covs=dummy_covs),
+        ClientClassMoment(client_id=2, sample_count=120, mu=honest_mean + 0.01 * torch.randn(d_z), block_covs=dummy_covs),
+        ClientClassMoment(client_id=3, sample_count=90, mu=honest_mean + 0.01 * torch.randn(d_z), block_covs=dummy_covs),
+        # Attacker transmits normal centroid but exploded variance to blind OSR
+        ClientClassMoment(client_id=88, sample_count=100, mu=honest_mean, block_covs=exploded_covs),
+    ]
+
+    clean, rejected = filter_byzantine_moments(submissions, gamma_0=3.0, zeta=1.5)
+
+    assert 88 in rejected
+    assert len(clean) == 4
+    for c in clean:
+        assert c.client_id != 88
 
 
 def test_law_of_total_variance_exactness():

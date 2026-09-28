@@ -30,6 +30,8 @@ class DecoupledDualBranchNetwork(BaseNetwork):
         density_dim: int = 16,
         dropout: float = 0.1,
         use_batchnorm: bool = True,
+        use_layernorm: bool = False,
+        activation: str = "relu",
         stochastic_encoder: bool = True,
     ):
         super().__init__()
@@ -46,6 +48,8 @@ class DecoupledDualBranchNetwork(BaseNetwork):
                 latent_dim=latent_dim,
                 dropout=dropout,
                 use_batchnorm=use_batchnorm,
+                use_layernorm=use_layernorm,
+                activation=activation,
             )
         else:
             self.encoder = DeterministicEncoder(
@@ -54,6 +58,8 @@ class DecoupledDualBranchNetwork(BaseNetwork):
                 latent_dim=latent_dim,
                 dropout=dropout,
                 use_batchnorm=use_batchnorm,
+                use_layernorm=use_layernorm,
+                activation=activation,
             )
 
         # 2. Known-Class Classifier Head C_phi
@@ -85,3 +91,11 @@ class DecoupledDualBranchNetwork(BaseNetwork):
     def set_encoder_parameters(self, state_dict: Dict[str, torch.Tensor]) -> None:
         """Load aggregated global encoder parameters."""
         self.encoder.load_state_dict(state_dict)
+
+    def get_all_parameters(self) -> Dict[str, torch.Tensor]:
+        """Extract full model state dictionary for federated parameter exchange."""
+        return {k: v.clone() for k, v in self.state_dict().items()}
+
+    def set_all_parameters(self, state_dict: Dict[str, torch.Tensor]) -> None:
+        """Load aggregated global model parameters."""
+        self.load_state_dict(state_dict)

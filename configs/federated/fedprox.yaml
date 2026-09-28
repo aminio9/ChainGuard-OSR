@@ -2,8 +2,8 @@ algorithm: "fedprox"
 num_clients: 10
 client_fraction: 0.5
 num_rounds: 100
-local_epochs: 5
-batch_size: 128
+local_epochs: 2
+batch_size: 64
 fedprox_mu: 0.01
 primal_dual_rho: 0.0
 covariance_prototype_aggregation: false

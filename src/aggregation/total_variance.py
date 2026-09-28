@@ -26,31 +26,31 @@ def aggregate_total_variance_moments(
     class_submissions: Dict[int, List[ClientClassMoment]],
     num_blocks: int = 4,
     block_dim: int = 16,
-    tikhonov_eps: float = 1e-4,
+    tikhonov_eps: float = 1e-5,
     apply_mad_filter: bool = True,
     mad_gamma_0: float = 3.0,
     mad_zeta: float = 1.5,
 ) -> Tuple[Dict[int, GlobalClassProfile], Dict[int, List[int]]]:
     """Aggregate local moments into exact global class profiles via Law of Total Variance (Theorem 1).
 
-    Mathematical Formulation:
-        1. Clean Set (Byzantine Filter, Eq. 14-16):
+    Mathematical Formulation (LaTeX Eq. 157-167):
+        1. Clean Set (Byzantine Filter, Eq. 151-155):
            K_c^{clean} = FilterMAD(K_c)
 
-        2. Global Centroid (Eq. 17):
+        2. Global Centroid (Eq. 159):
            mu_c = (1 / N_c) * sum_{k in K_c^{clean}} n_c^{(k)} * mu_c^{(k)}
            where N_c = sum_{k in K_c^{clean}} n_c^{(k)}
 
-        3. Global Pooled Block-Covariance (Eq. 18 / Theorem 1):
+        3. Global Pooled Block-Covariance (Eq. 164 / Theorem 1):
            Sigma_{c, G_b} = (1 / N_c) * sum_{k in K_c^{clean}} n_c^{(k)} * [
                Sigma_{c, G_b}^{(k)} + (mu_c^{(k)}[G_b] - mu_c[G_b])(mu_c^{(k)}[G_b] - mu_c[G_b])^T
            ] + eps_v * I_{d_b}
 
     Args:
         class_submissions: Dict mapping class_id -> list of ClientClassMoment.
-        num_blocks: Number of diagonal sub-blocks B (default: 4).
-        block_dim: Dimensionality of each sub-block d_b = d_z / B (default: 16).
-        tikhonov_eps: Tikhonov regularization parameter eps_v (default: 1e-4).
+        num_blocks: Number of diagonal sub-blocks B (default: 4 or 8).
+        block_dim: Dimensionality of each sub-block d_b = d_z / B.
+        tikhonov_eps: Tikhonov regularization parameter eps_v = 1e-5 (default: 1e-5).
         apply_mad_filter: Whether to run Byzantine MAD outlier filter.
         mad_gamma_0: Base multiplier for MAD threshold.
         mad_zeta: Finite-sample adaptation coefficient for MAD.
@@ -58,13 +58,19 @@ def aggregate_total_variance_moments(
     Returns:
         (global_profiles, rejected_clients_per_class)
     """
-    latent_dim = num_blocks * block_dim
     profiles: Dict[int, GlobalClassProfile] = {}
     rejections: Dict[int, List[int]] = {}
 
     for c, subs in class_submissions.items():
         if not subs:
             continue
+
+        actual_latent = subs[0].mu.size(0)
+        curr_b = num_blocks
+        curr_db = block_dim
+        if curr_b * curr_db != actual_latent:
+            curr_b = min(curr_b, actual_latent)
+            curr_db = actual_latent // curr_b
 
         # Step 1: Byzantine-Robust Outlier Filter (Equations 14-16)
         if apply_mad_filter and len(subs) > 2:
@@ -82,27 +88,27 @@ def aggregate_total_variance_moments(
         device = clean_subs[0].mu.device
         dtype = torch.float32
 
-        # Step 2: Global Sample Count and Centroid (Equation 17)
+        # Step 2: Global Sample Count and Centroid (Equation 17 / LaTeX Eq. 159)
         total_samples = sum(s.sample_count for s in clean_subs)
         n_c = max(total_samples, 1)
 
-        weighted_mu_sum = torch.zeros(latent_dim, dtype=dtype, device=device)
+        weighted_mu_sum = torch.zeros(actual_latent, dtype=dtype, device=device)
         for s in clean_subs:
             weighted_mu_sum += float(s.sample_count) * s.mu.to(dtype=dtype, device=device)
 
         global_mu = weighted_mu_sum / n_c  # (d_z,)
 
-        # Step 3: Exact Pooled Block Covariance via Law of Total Variance (Equation 18)
-        reg_eye = tikhonov_eps * torch.eye(block_dim, dtype=dtype, device=device)
+        # Step 3: Exact Pooled Block Covariance via Law of Total Variance (Equation 18 / LaTeX Eq. 164)
+        reg_eye = tikhonov_eps * torch.eye(curr_db, dtype=dtype, device=device)
         global_block_covs: List[torch.Tensor] = []
         inv_block_covs: List[torch.Tensor] = []
 
-        for b in range(num_blocks):
-            start_idx = b * block_dim
-            end_idx = start_idx + block_dim
+        for b in range(curr_b):
+            start_idx = b * curr_db
+            end_idx = start_idx + curr_db
             mu_global_b = global_mu[start_idx:end_idx]
 
-            pooled_b = torch.zeros((block_dim, block_dim), dtype=dtype, device=device)
+            pooled_b = torch.zeros((curr_db, curr_db), dtype=dtype, device=device)
 
             for s in clean_subs:
                 n_k = float(s.sample_count)

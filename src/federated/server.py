@@ -46,11 +46,14 @@ class FederatedServer:
             density_dim=config.model.density_dim,
             dropout=config.model.dropout,
             use_batchnorm=config.model.use_batchnorm,
+            use_layernorm=getattr(config.model, "use_layernorm", False),
+            activation=getattr(config.model, "activation", "relu"),
             stochastic_encoder=config.model.stochastic_encoder,
         ).to(self.device)
 
-        # Global encoder parameters
+        # Global encoder and classifier parameters
         self.global_encoder_params = self.global_model.get_encoder_parameters()
+        self.global_classifier_params = {k: v.clone() for k, v in self.global_model.classifier.state_dict().items()}
 
         # Frozen anchor model from previous round for Phase I entropy-gated distillation
         self.anchor_model: Optional[nn.Module] = None
@@ -75,12 +78,12 @@ class FederatedServer:
         self,
         round_idx: int,
         total_rounds: int,
-        eta_0: float = 0.01,
-        eta_min: float = 1e-4,
+        eta_0: float = 0.001,
+        eta_min: float = 1e-6,
     ) -> float:
-        """Compute scheduled learning rate via Cosine Annealing (Equation 10).
+        """Compute scheduled learning rate via Cosine Annealing (LaTeX Equation 100-103).
 
-        Mathematical Formulation (Equation 10):
+        Mathematical Formulation (LaTeX Equation 101):
             eta_t = eta_min + 0.5 * (eta_0 - eta_min) * (1 + cos(pi * t / T))
         """
         ratio = min(max(float(round_idx) / max(total_rounds, 1), 0.0), 1.0)
@@ -101,12 +104,12 @@ class FederatedServer:
         total_rounds = self.config.federated.num_rounds
         t_ratio = float(round_idx) / max(total_rounds, 1)
 
-        # Line 2 & 3: Compute scheduled learning rate eta_t (Equation 10)
+        # Line 2 & 3: Compute scheduled learning rate eta_t (LaTeX Equation 101)
         lr_t = self.compute_cosine_learning_rate(
             round_idx=round_idx,
             total_rounds=total_rounds,
             eta_0=self.config.optimization.learning_rate,
-            eta_min=1e-4,
+            eta_min=getattr(self.config.optimization, "eta_min", 1e-6),
         )
 
         active_clients = self.select_active_clients(
@@ -133,10 +136,11 @@ class FederatedServer:
             # Set cosine annealed learning rate
             client.set_learning_rate(lr_t)
 
-            # Synchronize global encoder parameters & dual multipliers
+            # Synchronize global encoder parameters, dual multipliers, and classifier head
             client.synchronize(
                 self.global_encoder_params,
                 self.dual_multipliers[client.client_id],
+                global_classifier_params=self.global_classifier_params,
             )
 
             # Train local epochs with dynamic anchor distillation
@@ -155,6 +159,19 @@ class FederatedServer:
 
         # Line 6: Aggregate encoder parameters via FedAvg
         new_global_params = aggregate_fedavg_parameters(client_updates)
+
+        # Aggregate classifier head if shared or running FedAvg/FedProx baseline
+        if (
+            getattr(self.config.federated, "share_classifier_head", False)
+            or self.config.federated.algorithm in ["fedavg", "fedprox"]
+        ):
+            classifier_updates = [
+                (client.get_classifier_parameters(), len(client.dataset))
+                for client in active_clients
+            ]
+            new_classifier_params = aggregate_fedavg_parameters(classifier_updates)
+            self.global_model.classifier.load_state_dict(new_classifier_params)
+            self.global_classifier_params = new_classifier_params
 
         # Line 13: Optional Primal-Dual multipliers update
         if self.config.loss.primal_dual_rho > 0.0:
