@@ -73,10 +73,9 @@ checkpoints/*.pt
 checkpoints/*.pth
 checkpoints/*.ckpt
 !checkpoints/.gitkeep
-results/runs/
-results/artifacts/
-results/*_test/
+results/*
 !results/.gitkeep
+scratch/
 *.log
 *.tar.gz
 *.zip
