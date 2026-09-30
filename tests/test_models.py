@@ -1,9 +1,9 @@
-"""Tests for model architectures: VIB stochastic encoder and decoupled heads."""
+"""Tests for model architectures: VIB stochastic encoder and classification head (LaTeX Section 4.1)."""
 
 import torch
 from src.models.encoder import VIBEncoder, DeterministicEncoder
-from src.models.heads import ClassificationHead, DensityHead
-from src.models.dual_branch import DecoupledDualBranchNetwork
+from src.models.heads import ClassificationHead
+from src.models.vib_network import VIBClassifierNetwork
 
 
 def test_vib_encoder_training_vs_eval():
@@ -33,37 +33,39 @@ def test_deterministic_encoder():
     assert torch.allclose(z, mu)
 
 
-def test_classification_and_density_heads():
+def test_classification_head():
     clf = ClassificationHead(latent_dim=8, num_classes=3)
-    density = DensityHead(latent_dim=8, density_dim=4)
-
     z = torch.randn(5, 8)
     logits = clf(z)
-    d_out = density(z)
 
     assert logits.shape == (5, 3)
-    assert d_out.shape == (5, 4)
     assert clf.weight_matrix.shape == (3, 8)
 
 
-def test_decoupled_network_parameter_sync(decoupled_model):
-    x = torch.randn(4, decoupled_model.encoder.network[0].in_features)
-    logits, d_out, z, mu, logvar = decoupled_model(x)
+def test_vib_classifier_network(decoupled_model):
+    x = torch.randn(4, decoupled_model.in_features)
+    logits, z, mu, logvar = decoupled_model(x)
 
     assert logits.shape == (4, decoupled_model.num_classes)
     assert z.shape == (4, decoupled_model.latent_dim)
+    assert mu.shape == (4, decoupled_model.latent_dim)
+
+    # Test deterministic classification and feature extraction
+    logits_det = decoupled_model.classify(x)
+    assert logits_det.shape == (4, decoupled_model.num_classes)
+
+    feat_det = decoupled_model.extract_features(x)
+    assert feat_det.shape == (4, decoupled_model.latent_dim)
 
     # Test extracting and setting encoder parameters
     encoder_params = decoupled_model.get_encoder_parameters()
     assert len(encoder_params) > 0
 
-    # Modify parameters and restore
-    new_model = DecoupledDualBranchNetwork(
-        in_features=decoupled_model.encoder.network[0].in_features,
+    new_model = VIBClassifierNetwork(
+        in_features=decoupled_model.in_features,
         latent_dim=decoupled_model.latent_dim,
         num_classes=decoupled_model.num_classes,
-        hidden_dim=decoupled_model.encoder.network[0].out_features,
-        density_dim=decoupled_model.density_dim,
+        hidden_dim=32,
     )
     new_model.set_encoder_parameters(encoder_params)
 

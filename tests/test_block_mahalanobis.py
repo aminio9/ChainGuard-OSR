@@ -20,8 +20,8 @@ class DummyEncoder(nn.Module):
 
     def forward(self, x):
         z = self.linear(x)
-        # Return tuple matching DecoupledDualBranchNetwork: (logits, z, sample, mu, logvar)
-        return (None, z, z, z, None)
+        # Return tuple matching VIBClassifierNetwork: (logits, z, mu, logvar)
+        return (None, z, z, None)
 
 
 def test_block_mahalanobis_computation():

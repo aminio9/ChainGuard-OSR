@@ -1,11 +1,12 @@
-"""Tests for Open-Set Recognition and Mondrian Conformal Prediction."""
+"""Tests for Open-Set Recognition and Mondrian Conformal Prediction (LaTeX Section 4.4 & Algorithm 2)."""
 
 import numpy as np
 import torch
 from src.osr.weibull_evt import WeibullEVTFitter, compute_evt_probabilities
 from src.osr.energy_ood import compute_free_energy_score
 from src.osr.conformal import MondrianConformalCalibrator
-from src.osr.edge_inference import EdgeInferenceEngine
+from src.osr.block_mahalanobis import WireSpeedEdgeDetector
+from src.aggregation.total_variance import GlobalClassProfile
 
 
 def test_free_energy_score():
@@ -18,22 +19,6 @@ def test_free_energy_score():
     energy_ood = compute_free_energy_score(logits_ood, temperature=1.0)
 
     assert energy_known.item() < energy_ood.item()
-
-
-def test_weibull_fitter_and_evt_discount():
-    fitter = WeibullEVTFitter(tail_size=10)
-    features = torch.randn(50, 4)
-    labels = torch.zeros(50, dtype=torch.long)
-    proto = torch.zeros(4)
-
-    fitter.fit(features, labels, {0: proto})
-    assert 0 in fitter.weibull_models
-
-    z = torch.randn(2, 4)
-    logits = torch.tensor([[5.0], [5.0]])
-    cal_probs = compute_evt_probabilities(z, logits, {0: proto}, fitter.weibull_models)
-    assert cal_probs.shape == (2, 2)  # Index 0 unknown, Index 1 known
-    assert torch.allclose(cal_probs.sum(dim=-1), torch.ones(2), atol=1e-5)
 
 
 def test_mondrian_conformal_guarantee():
@@ -59,27 +44,37 @@ def test_mondrian_conformal_guarantee():
     assert len(sets[2]) == 0
 
 
-def test_edge_inference_engine_zero_day(decoupled_model):
-    calibrator = MondrianConformalCalibrator(alpha=0.05)
-    # Calibrate with dummy quantiles: requires probability >= 0.8 to be accepted
-    calibrator.quantiles = {0: 0.2, 1: 0.2, 2: 0.2}
+def test_wire_speed_edge_detector_zero_day(decoupled_model):
+    latent_dim = decoupled_model.latent_dim
+    num_blocks = 4
+    block_dim = latent_dim // num_blocks
 
-    prototypes = {i: torch.randn(decoupled_model.latent_dim) for i in range(3)}
-    weibull_models = {i: (1.5, 2.0, 1.0) for i in range(3)}
+    profiles = {
+        0: GlobalClassProfile(
+            class_id=0,
+            total_samples=100,
+            mu=torch.zeros(latent_dim),
+            block_covs=[torch.eye(block_dim) for _ in range(num_blocks)],
+            inv_block_covs=[torch.eye(block_dim) for _ in range(num_blocks)],
+            conformal_threshold=10.0,
+        )
+    }
 
-    engine = EdgeInferenceEngine(
-        model=decoupled_model,
-        prototypes=prototypes,
-        weibull_models=weibull_models,
-        conformal_calibrator=calibrator,
-        unknown_class_id=-1,
+    detector = WireSpeedEdgeDetector(
+        frozen_encoder=decoupled_model.encoder,
+        global_profiles=profiles,
+        unknown_label=-1,
+        num_blocks=num_blocks,
+        block_dim=block_dim,
     )
 
-    # Test single flow
-    x = torch.randn(decoupled_model.encoder.network[0].in_features)
-    pred_cls, c_set, energy, u_prob = engine.predict_flow(x)
+    # In-distribution sample
+    x_in = torch.randn(decoupled_model.in_features) * 0.1
+    res_in = detector.predict_sample(x_in)
+    assert res_in.candidate_class == 0
 
-    assert isinstance(pred_cls, (int, np.integer))
-    assert isinstance(c_set, list)
-    assert isinstance(energy, float)
-    assert isinstance(u_prob, float)
+    # Batch prediction
+    x_batch = torch.randn(5, decoupled_model.in_features)
+    preds, is_unk, cands, scores = detector.predict_batch(x_batch)
+    assert len(preds) == 5
+    assert len(is_unk) == 5

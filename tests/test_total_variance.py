@@ -1,61 +1,8 @@
-"""Unit tests for Sample-Weighted MAD Byzantine Filter and Law of Total Variance (Theorem 1, Equations 14-18 & LaTeX Eq. 151-167)."""
+"""Unit tests for Law of Total Variance Exact Moment Aggregation (Theorem 1)."""
 
-import pytest
 import torch
 
-from src.aggregation.byzantine_mad import ClientClassMoment, filter_byzantine_moments
-from src.aggregation.total_variance import aggregate_total_variance_moments
-
-
-def test_byzantine_mad_rejection():
-    # 5 honest clients with close means, 1 malicious client with an extreme poison attack
-    d_z = 64
-    d_b = 16
-    honest_mean = torch.zeros(d_z)
-    dummy_covs = [torch.eye(d_b) for _ in range(4)]
-
-    submissions = [
-        ClientClassMoment(client_id=0, sample_count=100, mu=honest_mean + 0.05 * torch.randn(d_z), block_covs=dummy_covs),
-        ClientClassMoment(client_id=1, sample_count=80, mu=honest_mean + 0.04 * torch.randn(d_z), block_covs=dummy_covs),
-        ClientClassMoment(client_id=2, sample_count=120, mu=honest_mean + 0.06 * torch.randn(d_z), block_covs=dummy_covs),
-        ClientClassMoment(client_id=3, sample_count=90, mu=honest_mean + 0.03 * torch.randn(d_z), block_covs=dummy_covs),
-        ClientClassMoment(client_id=4, sample_count=110, mu=honest_mean + 0.05 * torch.randn(d_z), block_covs=dummy_covs),
-        # Poisoned attacker injecting massive shift: ||mu|| -> 100
-        ClientClassMoment(client_id=99, sample_count=100, mu=honest_mean + 100.0, block_covs=dummy_covs),
-    ]
-
-    clean, rejected = filter_byzantine_moments(submissions, gamma_0=3.0, zeta=1.5)
-
-    assert 99 in rejected
-    assert len(clean) == 5
-    for c in clean:
-        assert c.client_id != 99
-
-
-def test_byzantine_variance_explosion_rejection():
-    """Verify Theorem 1 Part 2 & Eq. 153: Arbitrary covariance trace explosion triggers Byzantine rejection."""
-    d_z = 64
-    d_b = 16
-    honest_mean = torch.zeros(d_z)
-    dummy_covs = [torch.eye(d_b) for _ in range(4)]
-    # Exploded covariance attacker: Tr(Sigma) -> 100000
-    exploded_covs = [torch.eye(d_b) * 10000.0 for _ in range(4)]
-
-    submissions = [
-        ClientClassMoment(client_id=0, sample_count=100, mu=honest_mean + 0.01 * torch.randn(d_z), block_covs=dummy_covs),
-        ClientClassMoment(client_id=1, sample_count=80, mu=honest_mean + 0.01 * torch.randn(d_z), block_covs=dummy_covs),
-        ClientClassMoment(client_id=2, sample_count=120, mu=honest_mean + 0.01 * torch.randn(d_z), block_covs=dummy_covs),
-        ClientClassMoment(client_id=3, sample_count=90, mu=honest_mean + 0.01 * torch.randn(d_z), block_covs=dummy_covs),
-        # Attacker transmits normal centroid but exploded variance to blind OSR
-        ClientClassMoment(client_id=88, sample_count=100, mu=honest_mean, block_covs=exploded_covs),
-    ]
-
-    clean, rejected = filter_byzantine_moments(submissions, gamma_0=3.0, zeta=1.5)
-
-    assert 88 in rejected
-    assert len(clean) == 4
-    for c in clean:
-        assert c.client_id != 88
+from src.aggregation.total_variance import ClientClassMoment, aggregate_total_variance_moments
 
 
 def test_law_of_total_variance_exactness():
@@ -104,12 +51,11 @@ def test_law_of_total_variance_exactness():
         )
 
     # 3. Decentralized aggregation via Law of Total Variance
-    profiles, _ = aggregate_total_variance_moments(
+    profiles = aggregate_total_variance_moments(
         class_submissions={0: submissions},
         num_blocks=num_blocks,
         block_dim=d_b,
         tikhonov_eps=0.0,  # Zero Tikhonov to test exact algebraic equality
-        apply_mad_filter=False,
     )
 
     prof = profiles[0]
@@ -120,3 +66,4 @@ def test_law_of_total_variance_exactness():
     # Verify Theorem 1 exactness: Sigma_decentralized == Sigma_centralized for all blocks
     for b in range(num_blocks):
         assert torch.allclose(prof.block_covs[b], centralized_block_covs[b], atol=1e-5)
+

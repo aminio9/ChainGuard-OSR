@@ -5,7 +5,7 @@ import torch
 from src.config import AppConfig
 from src.data.base import FlowDataset
 from src.data.synthetic import generate_synthetic_p2p_data
-from src.models.dual_branch import DecoupledDualBranchNetwork
+from src.models.vib_network import VIBClassifierNetwork
 
 
 @pytest.fixture
@@ -24,7 +24,6 @@ def sample_config() -> AppConfig:
     cfg.model.in_features = 12
     cfg.model.latent_dim = 16
     cfg.model.hidden_dim = 32
-    cfg.model.density_dim = 8
     cfg.experiment.seed = 42
     return cfg
 
@@ -41,12 +40,11 @@ def synthetic_dataset(sample_config) -> FlowDataset:
 
 
 @pytest.fixture
-def decoupled_model(sample_config) -> DecoupledDualBranchNetwork:
-    """Fixture providing a miniature decoupled network."""
-    return DecoupledDualBranchNetwork(
+def decoupled_model(sample_config) -> VIBClassifierNetwork:
+    """Fixture providing a miniature canonical VIB network."""
+    return VIBClassifierNetwork(
         in_features=sample_config.model.in_features,
         latent_dim=sample_config.model.latent_dim,
         num_classes=len(sample_config.data.known_classes),
         hidden_dim=sample_config.model.hidden_dim,
-        density_dim=sample_config.model.density_dim,
     )
