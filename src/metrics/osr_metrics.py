@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Any, Dict
 import numpy as np
 
 
@@ -91,34 +91,53 @@ def compute_fpr95(y_binary: np.ndarray, anomaly_scores: np.ndarray) -> float:
     return fpr
 
 
+def compute_oscr(
+    y_true: np.ndarray,
+    closed_preds: np.ndarray,
+    anomaly_scores: np.ndarray,
+    num_known_classes: int,
+) -> float:
+    """Compute Open-Set Classification Rate (OSCR: area under CCR vs FPR curve).
+
+    CCR(tau) = P(y_hat_closed(x) == y_true AND S(x) <= tau | y_true in C_K)
+    FPR(tau) = P(S(x) <= tau | y_true in C_U)
+    """
+    y_true = np.asarray(y_true, dtype=np.int64)
+    closed_preds = np.asarray(closed_preds, dtype=np.int64)
+    scores = np.asarray(anomaly_scores, dtype=float)
+
+    known_mask = y_true < num_known_classes
+    unknown_mask = y_true >= num_known_classes
+    n_k = int(np.sum(known_mask))
+    n_u = int(np.sum(unknown_mask))
+    if n_k == 0 or n_u == 0:
+        return 0.0
+
+    k_scores = scores[known_mask]
+    k_correct = (closed_preds[known_mask] == y_true[known_mask])
+    u_scores = scores[unknown_mask]
+
+    thresholds = np.unique(np.concatenate([k_scores, u_scores]))
+    thresholds = np.sort(thresholds)
+    ccr = np.array([np.sum(k_correct & (k_scores <= t)) / float(n_k) for t in thresholds])
+    fpr = np.array([np.sum(u_scores <= t) / float(n_u) for t in thresholds])
+
+    fpr = np.concatenate([[0.0], fpr, [1.0]])
+    ccr = np.concatenate([[0.0], ccr, [ccr[-1] if len(ccr) > 0 else 0.0]])
+    order = np.argsort(fpr, kind="mergesort")
+    oscr = float(np.trapezoid(ccr[order], fpr[order])) if hasattr(np, "trapezoid") else float(np.trapz(ccr[order], fpr[order]))
+    return float(np.clip(oscr, 0.0, 1.0))
+
+
 def compute_osr_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     anomaly_scores: np.ndarray,
     num_known_classes: int,
     unknown_label: int = -1,
-) -> Dict[str, float]:
-    """Compute comprehensive Open-Set Recognition evaluation metrics per Section 5.5 of paper.
-
-    Args:
-        y_true: Ground truth labels (known are 0..C-1, unknown is >= C).
-        y_pred: Predicted class (-1 or >= C for unknown, 0..C-1 for known).
-        anomaly_scores: Scores where higher values indicate unknown anomaly.
-        num_known_classes: Total known classes C.
-        unknown_label: Value used in y_pred to designate unknown.
-
-    Returns:
-        Dict containing:
-            - auroc: Area under ROC curve for known vs unknown discrimination
-            - aupr: Area under Precision-Recall curve
-            - fpr95: False Positive Rate on known traffic at 95% TPR
-            - kfr: Known False-Rejection Rate (Equation 109: false alarms on known traffic)
-            - false_alarm_rate: Alias for kfr
-            - unknown_recall: Recall on unknown zero-day attacks (Section 5.5)
-            - unknown_precision: Precision on unknown zero-day attacks
-            - unknown_f1: F1 score for the unknown class
-            - open_set_macro_f1: Macro-F1 across all |C_K| + 1 decision classes
-    """
+    closed_preds: np.ndarray | None = None,
+) -> Dict[str, Any]:
+    """Compute comprehensive Open-Set Recognition evaluation metrics per Section 5.5 of paper."""
     y_true = np.asarray(y_true, dtype=np.int64)
     y_pred = np.asarray(y_pred, dtype=np.int64)
 
@@ -130,14 +149,29 @@ def compute_osr_metrics(
     aupr = compute_binary_aupr(is_unknown_true, anomaly_scores)
     fpr95 = compute_fpr95(is_unknown_true, anomaly_scores)
 
-    # 2. Known False-Rejection Rate (KFR / FAR <= alpha = 0.05 by Theorem 2)
+    cand_preds = closed_preds if closed_preds is not None else np.where(is_unknown_pred, 0, y_pred)
+    oscr = compute_oscr(y_true, cand_preds, anomaly_scores, num_known_classes)
+
+    # 2. Known False-Rejection Rate (KFR / FAR <= alpha = 0.05 by Theorem 2) & Per-Class Coverage
     known_mask = (is_unknown_true == 0)
     if np.sum(known_mask) > 0:
         kfr = float(np.mean(is_unknown_pred[known_mask]))
     else:
         kfr = 0.0
 
-    # 3. Detection Rate / Recall on unknown zero-day attacks
+    per_class_kfr: Dict[int, float] = {}
+    per_class_coverage: Dict[int, float] = {}
+    for c in range(num_known_classes):
+        c_mask = (y_true == c)
+        if np.sum(c_mask) > 0:
+            c_kfr = float(np.mean(is_unknown_pred[c_mask]))
+            per_class_kfr[c] = c_kfr
+            per_class_coverage[c] = 1.0 - c_kfr
+        else:
+            per_class_kfr[c] = 0.0
+            per_class_coverage[c] = 1.0
+
+    # 3. Detection Rate / Recall (TPR) on unknown zero-day attacks
     unknown_mask = (is_unknown_true == 1)
     if np.sum(unknown_mask) > 0:
         unk_recall = float(np.mean(is_unknown_pred[unknown_mask]))
@@ -171,12 +205,18 @@ def compute_osr_metrics(
     return {
         "auroc": auroc,
         "aupr": aupr,
+        "oscr": oscr,
         "fpr95": fpr95,
         "kfr": kfr,
+        "empirical_coverage": 1.0 - kfr,
         "false_alarm_rate": kfr,
+        "per_class_kfr": per_class_kfr,
+        "per_class_coverage": per_class_coverage,
         "unknown_recall": unk_recall,
+        "unknown_tpr": unk_recall,
         "unknown_detection_rate": unk_recall,
         "unknown_precision": unk_precision,
         "unknown_f1": unk_f1,
         "open_set_macro_f1": float(np.mean(f1_list)),
     }
+
