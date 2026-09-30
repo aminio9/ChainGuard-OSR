@@ -79,9 +79,12 @@ def compute_anchor_weight(
         Tensor of shape (batch_size,) with adaptive anchor weights.
     """
     warmup = t0 if t0 is not None else rho_warm
-    # Sigmoid progression factor
+    if float(t_ratio) < warmup:
+        # Strictly reserve first rho_warm of rounds for unconstrained local empirical exploration (LaTeX Eq. 66)
+        return torch.zeros_like(u_anc)
+
+    # Sigmoid progression factor following warm-up
     sigmoid_arg = -kappa * (float(t_ratio) - warmup)
-    # Numerical clip to avoid overflow
     sigmoid_arg = max(min(sigmoid_arg, 50.0), -50.0)
     time_ramp = 1.0 / (1.0 + math.exp(sigmoid_arg))
 

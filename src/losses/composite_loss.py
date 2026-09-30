@@ -1,33 +1,43 @@
-"""Composite multi-objective local loss calculator (Equations 9-11 & Algorithm 1 Line 8)."""
+"""Composite Phase I Local Loss Calculator (LaTeX Section 4.2, Eq. eq:total_client_loss).
+
+Formulation:
+    L_local(theta_k, psi_k) = L_BLA(theta_k, psi_k) + lambda_vib * L_VIB(theta_k)
+
+Features:
+    1. Logit-Adjusted Balanced Risk Minimization (L_BLA): Enlarges rare-class margins among
+       present classes (c in Y_k) and suppresses absent-class gradients (c in Y_K \\ Y_k)
+       on the shared encoder f_{theta_k}.
+    2. Variational Information Bottleneck (L_VIB): Pulls posterior means mu(x; theta_k) toward
+       the origin and injects Gaussian noise during training to reduce packet-noise sensitivity.
+"""
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
-from src.losses.class_balanced import class_balanced_focal_loss
+
+from src.losses.logit_adjusted import (
+    LogitAdjustedBalancedLoss,
+    compute_laplace_class_priors,
+)
 from src.losses.vib_loss import vib_kl_divergence_loss
-from src.losses.orthogonal_loss import orthogonal_anchor_loss
-from src.losses.anchor_loss import DynamicGlobalAnchorLoss
-from src.losses.primal_dual_loss import primal_dual_consensus_loss
 from src.config import LossConfig
 
 
 class CompositeLossCalculator:
-    """Computes total composite training loss across Phase I objectives (Equations 9-11).
-
-    Mathematical Formulation (Equations 9 & 11):
-        min_{w_k} L_local = L_CB + lambda_vib * L_VIB + lambda_anc(x, t) * L_anchor [+ L_PD]
-    """
+    """Computes total composite training loss across Phase I objectives: L_local = L_BLA + lambda_vib * L_VIB."""
 
     def __init__(self, config: LossConfig):
         self.config = config
-        self.dynamic_anchor = DynamicGlobalAnchorLoss(
-            tau_g=getattr(config, "tau_g", 2.0),
-            max_lambda=getattr(config, "max_lambda_anchor", config.lambda_anchor if config.lambda_anchor > 0 else 1.0),
-            rho_warm=getattr(config, "rho_warm", getattr(config, "anchor_t0", 0.15)),
-        )
+        gamma_cfg = getattr(config, "gamma_bla", None)
+        tau_cfg = getattr(config, "tau_bla", 1.0)
+        self.gamma_bla = float(gamma_cfg if gamma_cfg is not None else tau_cfg)
+        self.tau_bla = self.gamma_bla
+        self.laplace_eps = getattr(config, "laplace_eps", 0.1)
+        self.lambda_vib = getattr(config, "lambda_vib", 0.01)
+        self.bla_loss_fn = LogitAdjustedBalancedLoss(tau=self.tau_bla, gamma=self.gamma_bla)
 
     def __call__(
         self,
@@ -35,87 +45,54 @@ class CompositeLossCalculator:
         targets: torch.Tensor,
         mu: torch.Tensor,
         logvar: torch.Tensor,
-        classifier_weights: torch.Tensor,
-        local_encoder: Optional[nn.Module] = None,
-        global_encoder_params: Optional[Dict[str, torch.Tensor]] = None,
-        dual_lambda: Optional[torch.Tensor] = None,
-        samples_per_class: Optional[List[int] | np.ndarray] = None,
-        teacher_logits: Optional[torch.Tensor] = None,
-        t_ratio: float = 0.0,
+        class_priors: Optional[torch.Tensor] = None,
+        samples_per_class: Optional[Union[List[int], np.ndarray, torch.Tensor]] = None,
+        **kwargs: Any,  # Gracefully accept legacy unused arguments (teacher_logits, t_ratio, etc.)
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute all loss components and combine into total loss scalar.
+        """Compute Phase I loss components.
 
         Args:
-            logits: Local student prediction logits.
-            targets: True class labels.
-            mu: Latent representation mean from VIB.
-            logvar: Latent representation log-variance from VIB.
-            classifier_weights: Linear classification head weight matrix.
-            local_encoder: Local feature encoder module (for primal-dual).
-            global_encoder_params: Frozen global parameters (for primal-dual).
-            dual_lambda: Lagrange multiplier vector (for primal-dual).
-            samples_per_class: Class-frequency distribution for effective number weighting.
-            teacher_logits: Logits from frozen global anchor model (for entropy-gated KD).
-            t_ratio: Current federation round progression ratio t / T in [0, 1].
+            logits: Output classification logits ell_k(x) in R^{|C_K|}.
+            targets: Ground-truth class labels y in C_K.
+            mu: Latent representation mean from VIB mu(x; theta).
+            logvar: Latent representation log-variance from VIB log sigma^2(x; theta).
+            class_priors: Precomputed Laplace class priors pi^{(k)}.
+            samples_per_class: Class-frequency distribution if priors are not precomputed.
 
         Returns:
-            (total_loss, metrics_dict)
+            (total_loss, breakdown_metrics)
         """
-        # 1. Class-Balanced Focal Cross-Entropy (Equations 1-2)
-        l_cb = class_balanced_focal_loss(
-            logits,
-            targets,
-            samples_per_class=samples_per_class,
-            beta=self.config.beta_cb,
-            gamma=self.config.focal_gamma,
-        )
+        # 1. Obtain or compute class priors
+        if class_priors is None:
+            if samples_per_class is not None:
+                class_priors = compute_laplace_class_priors(
+                    samples_per_class,
+                    num_classes=logits.size(1),
+                    epsilon=self.laplace_eps,
+                    device=logits.device,
+                )
+            else:
+                # Uniform fallback
+                class_priors = torch.ones(logits.size(1), device=logits.device) / float(logits.size(1))
+        else:
+            class_priors = class_priors.to(logits.device)
 
-        # 2. Variational Information Bottleneck KL Regularization (Equations 3-4)
-        if self.config.lambda_vib > 0.0:
+        # 2. Logit-Adjusted Balanced Task Loss (L_BLA)
+        l_bla = self.bla_loss_fn(logits, targets, class_priors)
+
+        # 3. Variational Information Bottleneck KL Regularization (L_VIB)
+        if self.lambda_vib > 0.0:
             l_vib = vib_kl_divergence_loss(mu, logvar)
         else:
             l_vib = torch.tensor(0.0, device=logits.device)
 
-        # 3. Dynamic Global Anchor (Equations 5-8) OR Orthogonal Anchor Regularizer
-        if teacher_logits is not None:
-            # Full Research-Grade Dynamic Anchor with Shannon Entropy Gating (Equations 5-8)
-            l_anchor = self.dynamic_anchor(logits, teacher_logits, t_ratio=t_ratio)
-            anchor_loss_weighted = l_anchor  # lambda_anc is already integrated inside dynamic_anchor
-        elif self.config.lambda_anchor > 0.0:
-            # Baseline Orthogonal Anchor Regularizer (Ablation)
-            l_anchor = orthogonal_anchor_loss(classifier_weights)
-            anchor_loss_weighted = self.config.lambda_anchor * l_anchor
-        else:
-            l_anchor = torch.tensor(0.0, device=logits.device)
-            anchor_loss_weighted = torch.tensor(0.0, device=logits.device)
-
-        # 4. Primal-Dual Augmented Lagrangian Consensus OR FedProx Proximal Penalty (LaTeX Section 5.3)
-        eff_rho = max(self.config.primal_dual_rho, getattr(self.config, "fedprox_mu", 0.0))
-        if eff_rho > 0.0 and local_encoder is not None and global_encoder_params is not None:
-            effective_lambda = dual_lambda if dual_lambda is not None else torch.zeros(1, device=logits.device)
-            l_pd = primal_dual_consensus_loss(
-                local_encoder,
-                global_encoder_params,
-                effective_lambda,
-                rho=eff_rho,
-            )
-        else:
-            l_pd = torch.tensor(0.0, device=logits.device)
-
-        # Composite sum (Equation 9)
-        total_loss = (
-            l_cb
-            + self.config.lambda_vib * l_vib
-            + anchor_loss_weighted
-            + l_pd
-        )
+        # 4. Total Loss
+        total_loss = l_bla + self.lambda_vib * l_vib
 
         breakdown = {
             "loss_total": float(total_loss.item()),
-            "loss_cb": float(l_cb.item()),
+            "loss_bla": float(l_bla.item()),
             "loss_vib": float(l_vib.item()),
-            "loss_anchor": float(l_anchor.item()),
-            "loss_pd": float(l_pd.item()),
         }
 
         return total_loss, breakdown
