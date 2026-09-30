@@ -1,0 +1,5 @@
+ablation_name: "no_bla_loss"
+description: "Ablation A2: Remove Logit-Adjusted Balanced Risk Minimization (tau_bla = 0, standard empirical CE)"
+overrides:
+  loss:
+    tau_bla: 0.0

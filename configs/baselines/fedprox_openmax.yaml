@@ -4,8 +4,10 @@ model_config: "configs/models/baseline_mlp.yaml"
 osr_method: "weibull_openmax"
 openmax_tail_size: 20
 loss:
+  tau_bla: 0.0
+  lambda_vib: 0.0
+  fedprox_mu: 0.01
   beta_cb: 0.0
   focal_gamma: 0.0
-  lambda_vib: 0.0
   lambda_anchor: 0.0
   primal_dual_rho: 0.0

@@ -1,5 +1,5 @@
 experiment:
-  name: "federated_osr_default"
+  name: "federated_osr_canonical"
   seed: 42
   device: "auto" # "cuda", "cpu", or "auto"
   output_dir: "results/runs"
@@ -8,38 +8,38 @@ experiment:
   save_frequency: 10
 
 data:
-  dataset_name: "synthetic_p2p" # "b_tat", "b_nat", or "synthetic_p2p"
+  dataset_name: "b_nat" # "b_tat", "b_nat", or "synthetic_p2p"
   data_dir: "data"
-  in_features: 43
+  in_features: 34
   num_classes_total: 10
-  known_classes: [0, 1, 2, 3, 4, 5, 6] # C = 7 known classes
-  unknown_classes: [7, 8, 9]           # U = 3 zero-day unknown classes
-  openness: 0.1835                     # Computed via 1 - sqrt(2C / (2C + U))
+  known_classes: [0, 1, 2, 3]          # Known attack classes
+  unknown_classes: [4, 5]              # Zero-day unknown classes
   test_split_ratio: 0.2
   cal_split_ratio: 0.1                 # Calibration set for Conformal Prediction
 
 federated:
   num_clients: 10
-  client_fraction: 0.5                 # Active fraction per round
-  num_rounds: 100                      # T = 100 global rounds
+  client_fraction: 1.0                 # Full or partial client participation
+  num_rounds: 30                       # Communication rounds
   local_epochs: 2                      # E = 2 local epochs per round (Section 5.3)
   batch_size: 64                       # B_s = 64 mini-batch size (Section 5.3)
-  num_blocks: 8                        # B = 8 diagonal sub-blocks (Section 4.3: d_b = 8)
-  block_dim: 8                         # d_b = 8 sub-block dimension (64 = 8 * 8)
-  mad_gamma_0: 3.0                     # Byzantine MAD multiplier gamma_0 (Equation 148)
-  mad_zeta: 1.5                        # Sample-size adaptation factor zeta (Equation 148)
-  tikhonov_eps: 0.00001                # Tikhonov stabilizer epsilon_v = 1e-5 (Equation 167)
+  num_blocks: 4                        # B = 4 diagonal sub-blocks (Section 4.3)
+  block_dim: 16                        # d_b = 16 sub-block dimension (64 = 4 * 16)
+  tikhonov_eps: 0.0001                 # Tikhonov stabilizer epsilon_v = 1e-4
   partition:
-    strategy: "dirichlet"              # "dirichlet" or "iid"
-    beta_dirichlet: 0.1                # Extreme non-IID label skew (alpha_D = 0.1)
+    strategy: "iid"                    # "iid" or "dirichlet"
+    beta_dirichlet: 0.5                # Non-IID Dirichlet parameter
 
 model:
-  architecture: "vib_dual_branch"
-  in_features: 43
+  architecture: "vib_network"
+  in_features: 34
   latent_dim: 64                       # d_z = 64 bottleneck dimension
-  hidden_dim: 128                      # Configurable MLP backbone (Section 5.3)
-  density_dim: 16
+  hidden_dim: [512, 256, 128]          # MLP backbone: 512 -> 256 -> 128 (Section 5.3)
   dropout: 0.1
+  use_batchnorm: false
+  use_layernorm: true
+  activation: "gelu"
+  stochastic_encoder: true
 
 optimization:
   optimizer: "adam"                    # Adam with Cosine Annealing (Section 5.3)
@@ -47,26 +47,17 @@ optimization:
   eta_min: 0.000001                    # eta_min = 10^-6 (Section 5.3)
   weight_decay: 0.0001
   clip_grad_norm: 1.0                  # Gradient clipping at 1.0 (Section 5.3)
-  lr_decay_step: 40
-  lr_decay_gamma: 0.5
 
 loss:
-  beta_cb: 0.999                       # Effective number hyperparameter (Equation 32)
-  focal_gamma: 2.0                     # Focal modulation parameter
-  lambda_vib: 0.01                     # VIB KL penalty weight (Section 4.1.4: lambda_vib = 0.01)
-  lambda_anchor: 1.0                   # Anchor penalty ceiling lambda_anc^max
-  tau_g: 2.0                           # Distillation temperature tau_g = 2.0 (Equation 67)
-  max_lambda_anchor: 1.0               # Peak penalty ceiling (Equation 72)
-  anchor_kappa: 10.0                   # Sigmoid steepness kappa = 10 (Equation 74)
-  rho_warm: 0.15                       # Warm-up fraction rho_warm = 0.15 (Equation 74)
-  anchor_t0: 0.15                      # Alias for rho_warm
-  primal_dual_rho: 0.1                 # Quadratic augmented Lagrangian penalty
+  tau_bla: 1.0                         # Logit-adjusted margin temperature tau (Section 4.2.1)
+  laplace_eps: 0.1                     # Laplace smoothing for local priors (Section 4.2.1)
+  lambda_vib: 0.01                     # VIB KL penalty weight (Section 4.2.2)
+  beta_cb: 0.999                       # Deprecated fallback
+  focal_gamma: 2.0                     # Deprecated fallback
+  lambda_anchor: 0.0                   # Anchor loss removed in favor of L_BLA
 
 osr:
-  weibull_tail_size: 20
-  energy_temperature: 1.0
+  method: "block_mahalanobis_conformal"
   conformal_alpha: 0.05                # 95% guaranteed coverage bound (alpha = 0.05)
-  enable_weibull: true
-  enable_energy: true
-  enable_conformal: true
-  enable_block_mahalanobis: true       # Linear-time Block-Diagonal Mahalanobis (Algorithm 2)
+  num_blocks: 4
+  block_dim: 16

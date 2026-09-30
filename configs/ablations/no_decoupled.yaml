@@ -1,0 +1,5 @@
+ablation_name: "no_decoupled"
+description: "Ablation A3: Remove Decoupled Server Parameter Aggregation (use monolithic FedAvg)"
+overrides:
+  federated:
+    aggregation_strategy: "fedavg"

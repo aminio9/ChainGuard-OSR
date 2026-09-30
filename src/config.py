@@ -45,34 +45,34 @@ class PartitionConfig(BaseModel):
 
 
 class FederatedConfig(BaseModel):
-    algorithm: str = "primal_dual_consensus"
+    algorithm: str = "fedavg"
     num_clients: int = 10
-    client_fraction: float = 0.5
-    num_rounds: int = 100
+    client_fraction: float = 1.0
+    num_rounds: int = 50
     local_epochs: int = 2
     batch_size: int = 64
-    primal_dual_rho: float = 0.1
-    covariance_prototype_aggregation: bool = True
-    share_classifier_head: bool = False
+    primal_dual_rho: float = 0.0
+    covariance_prototype_aggregation: bool = False
+    share_classifier_head: bool = True
     fedprox_mu: float = 0.0
-    num_blocks: int = 8
-    block_dim: int = 8
-    mad_gamma_0: float = 3.0
-    mad_zeta: float = 1.5
-    tikhonov_eps: float = 1e-5
+    num_blocks: int = 4
+    block_dim: int = 16
+    min_cov_samples: int = 3
+    tikhonov_eps: float = 1e-4
+    aggregation_strategy: str = "decoupled"
     partition: PartitionConfig = Field(default_factory=PartitionConfig)
 
 
 class ModelConfig(BaseModel):
-    architecture: str = "vib_dual_branch"
-    in_features: int = 43
+    architecture: str = "vib_network"
+    in_features: int = 34
     latent_dim: int = 64
-    hidden_dim: Union[int, List[int]] = 128
-    density_dim: int = 16
+    hidden_dim: Union[int, List[int]] = Field(default_factory=lambda: [512, 256, 128])
+    density_dim: int = 0
     dropout: float = 0.1
-    use_batchnorm: bool = True
-    use_layernorm: bool = False
-    activation: str = "relu"
+    use_batchnorm: bool = False
+    use_layernorm: bool = True
+    activation: str = "gelu"
     stochastic_encoder: bool = True
 
 
@@ -87,11 +87,14 @@ class OptimizationConfig(BaseModel):
 
 
 class LossConfig(BaseModel):
+    tau_bla: float = 1.0
+    gamma_bla: Optional[float] = None
+    laplace_eps: float = 0.1
+    lambda_vib: float = 0.01
     beta_cb: float = 0.999
     focal_gamma: float = 2.0
-    lambda_vib: float = 0.01
-    lambda_anchor: float = 1.0
-    primal_dual_rho: float = 0.1
+    lambda_anchor: float = 0.0
+    primal_dual_rho: float = 0.0
     fedprox_mu: float = 0.0
     tau_g: float = 2.0
     max_lambda_anchor: float = 1.0
@@ -148,6 +151,11 @@ def load_config(config_path: str | Path, overrides: Optional[dict[str, Any]] = N
 
     with open(path, "r", encoding="utf-8") as f:
         raw_cfg = yaml.safe_load(f) or {}
+
+    # If the YAML file encapsulates its modifications under an 'overrides' block (common in ablation configs)
+    if "overrides" in raw_cfg and isinstance(raw_cfg["overrides"], dict):
+        file_overrides = raw_cfg.pop("overrides")
+        raw_cfg = _deep_update(raw_cfg, file_overrides)
 
     # Resolve modular config pointers if present
     sub_config_keys = {
