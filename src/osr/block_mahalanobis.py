@@ -6,7 +6,8 @@ by evaluating block-diagonal elliptic distances across B independent sub-blocks.
 
 from __future__ import annotations
 
-from typing import Dict, List, NamedTuple, Optional, Tuple
+import math
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
@@ -18,7 +19,7 @@ class MahalanobisInferenceResult(NamedTuple):
 
     predicted_label: int  # Known class index or unknown_label (-1)
     is_unknown: bool  # True if flagged as zero-day exploit
-    candidate_class: int  # c_hat = argmin D_block(z, c)
+    candidate_class: int  # c_hat = argmin D_block(z, c) / tau_{alpha, c}
     nonconformity_score: float  # S(x) = D_block(z, c_hat)
     conformal_threshold: float  # tau_{alpha, c_hat}
     class_distances: Dict[int, float]  # All D_block(z, c)
@@ -43,7 +44,7 @@ def compute_single_block_distance(
     # Quadratic form: diff @ inv_cov_block @ diff^T
     temp = torch.matmul(diff, inv_cov_block)  # Shape: (..., d_b)
     dist = torch.sum(temp * diff, dim=-1)  # Shape: (...)
-    return dist
+    return torch.clamp(dist, min=0.0)
 
 
 def compute_block_mahalanobis_distances(
@@ -52,9 +53,9 @@ def compute_block_mahalanobis_distances(
     num_blocks: int = 4,
     block_dim: int = 16,
 ) -> Dict[int, torch.Tensor]:
-    """Compute Block-Diagonal Mahalanobis distance D_block(z, c) for all classes (Equation 19).
+    """Compute Block-Diagonal Mahalanobis distance D_block(z, c) for all classes (Section 4.3, Eq. eq:block_mahalanobis).
 
-    Mathematical Formulation (Equation 19):
+    Mathematical Formulation (Eq. eq:block_mahalanobis):
         D_block(z, c) = sum_{b=1}^B (z[G_b] - mu_c[G_b])^T (Sigma_{c, G_b})^{-1} (z[G_b] - mu_c[G_b])
 
     Args:
@@ -92,9 +93,9 @@ def compute_block_mahalanobis_distances(
 
 
 class WireSpeedEdgeDetector:
-    """Real-Time Edge Detector implementing Algorithm 2 with finite-sample conformal guarantees.
+    """Real-Time Edge Detector implementing Section 4.4 with finite-sample conformal guarantees.
 
-    Complexity: O(|C_K| * d_z * d_b), runtime < 0.25 ms.
+    Complexity: O(C * d_z * d_b), runtime < 0.25 ms.
     """
 
     def __init__(
@@ -114,15 +115,17 @@ class WireSpeedEdgeDetector:
 
     @torch.no_grad()
     def predict_sample(self, x: torch.Tensor) -> MahalanobisInferenceResult:
-        """Execute Algorithm 2 for a single input flow vector x.
+        """Execute Section 4.4 decision rule for a single input flow vector x.
 
-        Lines 1-10:
-            1. z = mu(x; theta_g^*)
-            2. Compute D_block(z, c) for all c in C_K
-            3. c_hat = argmin D_block(z, c)
-            4. S(x) = D_block(z, c_hat)
-            5. If S(x) > tau_{alpha, c_hat}: return Unknown
-            6. Else: return c_hat
+        Steps (Section 4.4, Eq. eq:osr_decision_rule):
+            1. z_test = f_{theta^*}(x_test) = m_{theta^*}(x_test)
+            2. Compute D_block(z_test, c) for all c in Y_K
+            3. hat{y}(x_test) = argmin_{c in Y_K} D_block(z_test, c) / tau_{alpha, c}
+            4. S(x_test) = min_{c in Y_K} D_block(z_test, c) / tau_{alpha, c}
+                         = D_block(z_test, hat{y}(x_test)) / tau_{alpha, hat{y}(x_test)}
+            5. Reject as Unknown iff S(x_test) > 1 (equivalently D_block(z_test, hat{y}(x_test)) > tau_{alpha, hat{y}(x_test)},
+               i.e., C_{1-alpha}(x_test) == empty since 0 < tau_{alpha, c} < inf for all c in Y_K)
+            6. Else: return hat{y}(x_test)
         """
         device = next(self.encoder.parameters()).device
         if x.ndim == 1:
@@ -130,16 +133,20 @@ class WireSpeedEdgeDetector:
         x = x.to(device)
 
         # Line 1: Deterministic forward pass z = mu(x)
-        # Handle dual branch or single encoder
-        output = self.encoder(x)
-        if isinstance(output, tuple):
-            # dual branch returns (logits, latent_z, z_sample, mu, logvar) or similar
-            if len(output) >= 4:
-                mu = output[3]  # mu(x)
-            else:
-                mu = output[0]
+        if hasattr(self.encoder, "extract_features"):
+            mu = self.encoder.extract_features(x)
         else:
-            mu = output
+            output = self.encoder(x)
+            if isinstance(output, tuple):
+                # VIBClassifierNetwork returns (logits, z, mu, logvar)
+                if len(output) == 4:
+                    mu = output[2] if output[2] is not None else output[1]
+                elif len(output) >= 5:
+                    mu = output[3]
+                else:
+                    mu = output[0]
+            else:
+                mu = output
 
         z_test = mu.squeeze(0)  # Shape: (d_z,)
 
@@ -153,13 +160,21 @@ class WireSpeedEdgeDetector:
 
         dist_dict: Dict[int, float] = {c: float(v.item()) for c, v in dists.items()}
 
-        # Line 5: c_hat = argmin D_c
-        best_class = min(dist_dict.keys(), key=lambda c: dist_dict[c])
+        # Threshold-normalized candidate selection: c_hat = argmin_c D_block(z, c) / tau_{alpha, c}
+        # Ensures D_block(z, c_hat) > tau_{alpha, c_hat} iff D_block(z, c) > tau_{alpha, c} for all c in Y_K
+        best_class = min(
+            dist_dict.keys(),
+            key=lambda c: (
+                dist_dict[c] / self.profiles[c].conformal_threshold
+                if (self.profiles[c].conformal_threshold > 0.0 and math.isfinite(self.profiles[c].conformal_threshold))
+                else dist_dict[c]
+            ),
+        )
         s_score = dist_dict[best_class]
 
         threshold = self.profiles[best_class].conformal_threshold
 
-        # Line 7-10: Decision Rule (Equation 27)
+        # Decision Rule (Eq. eq:osr_decision_rule): Reject iff D(z, c_hat) > tau_{alpha, c_hat} (i.e. C_{1-alpha}(x) == empty)
         is_unknown = s_score > threshold
         pred_label = self.unknown_label if is_unknown else best_class
 
@@ -176,7 +191,7 @@ class WireSpeedEdgeDetector:
     def predict_batch(
         self, x: torch.Tensor
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Execute Algorithm 2 on a batch of test flow vectors.
+        """Execute Section 4.4 decision rule on a batch of test flow vectors.
 
         Returns:
             (predictions, is_unknown_flags, candidate_classes, nonconformity_scores)
@@ -184,14 +199,19 @@ class WireSpeedEdgeDetector:
         device = next(self.encoder.parameters()).device
         x = x.to(device)
 
-        output = self.encoder(x)
-        if isinstance(output, tuple):
-            if len(output) >= 4:
-                z_batch = output[3]
-            else:
-                z_batch = output[0]
+        if hasattr(self.encoder, "extract_features"):
+            z_batch = self.encoder.extract_features(x)
         else:
-            z_batch = output
+            output = self.encoder(x)
+            if isinstance(output, tuple):
+                if len(output) == 4:
+                    z_batch = output[2] if output[2] is not None else output[1]
+                elif len(output) >= 5:
+                    z_batch = output[3]
+                else:
+                    z_batch = output[0]
+            else:
+                z_batch = output
 
         dists = compute_block_mahalanobis_distances(
             z_batch,
@@ -201,15 +221,23 @@ class WireSpeedEdgeDetector:
         )
 
         class_keys = list(self.profiles.keys())
-        # Stack distances into (N, |C_K|)
+        # Stack distances into (N, C)
         dist_matrix = torch.stack([dists[c] for c in class_keys], dim=1)  # (N, C)
-        best_indices = torch.argmin(dist_matrix, dim=1)  # (N,)
 
         thresholds = torch.tensor(
             [self.profiles[c].conformal_threshold for c in class_keys],
             dtype=torch.float32,
             device=device,
         )
+
+        # Threshold-normalized distance ratio D(z, c) / tau_{alpha, c}
+        valid_tau = (thresholds > 0.0) & torch.isfinite(thresholds)
+        safe_thresholds = torch.where(valid_tau, thresholds, torch.ones_like(thresholds))
+        norm_dist_matrix = dist_matrix / safe_thresholds.unsqueeze(0)
+        best_indices = torch.argmin(norm_dist_matrix, dim=1)  # (N,)
+
+        # Set-based acceptance matrix: accepted_mask[i, j] is True iff D_block(z_i, c_j) <= tau_{alpha, c_j}
+        accepted_mask = dist_matrix <= thresholds.unsqueeze(0)
 
         preds = []
         is_unknown_list = []
@@ -219,16 +247,19 @@ class WireSpeedEdgeDetector:
         for i in range(len(x)):
             best_idx = int(best_indices[i].item())
             cand_c = class_keys[best_idx]
-            score = float(dist_matrix[i, best_idx].item())
-            thresh = float(thresholds[best_idx].item())
+            norm_score = float(norm_dist_matrix[i, best_idx].item())
+            raw_score = float(dist_matrix[i, best_idx].item())
+            tau_val = float(thresholds[best_idx].item())
 
-            is_unk = score > thresh
+            # Set-based rejection rule: reject iff no known class is accepted (C_{1-alpha}(x_i) == empty)
+            has_accepted_class = bool(torch.any(accepted_mask[i]).item())
+            is_unk = not has_accepted_class
             pred = self.unknown_label if is_unk else cand_c
 
             preds.append(pred)
             is_unknown_list.append(is_unk)
             cand_list.append(cand_c)
-            scores_list.append(score)
+            scores_list.append(norm_score if (tau_val > 0.0 and math.isfinite(tau_val)) else raw_score)
 
         return (
             np.array(preds, dtype=np.int64),
@@ -236,3 +267,56 @@ class WireSpeedEdgeDetector:
             np.array(cand_list, dtype=np.int64),
             np.array(scores_list, dtype=np.float32),
         )
+
+    @torch.no_grad()
+    def predict_batch_detailed(self, x: torch.Tensor) -> Dict[str, Any]:
+        """Execute Section 4.4 decision rule and return full diagnostic arrays including conformal prediction sets."""
+        device = next(self.encoder.parameters()).device
+        x = x.to(device)
+        if hasattr(self.encoder, "extract_features"):
+            z_batch = self.encoder.extract_features(x)
+        else:
+            output = self.encoder(x)
+            z_batch = output[2] if isinstance(output, tuple) and len(output) == 4 else (output[0] if isinstance(output, tuple) else output)
+
+        dists = compute_block_mahalanobis_distances(
+            z_batch, self.profiles, num_blocks=self.num_blocks, block_dim=self.block_dim
+        )
+        class_keys = list(self.profiles.keys())
+        dist_matrix = torch.stack([dists[c] for c in class_keys], dim=1)
+        thresholds = torch.tensor(
+            [self.profiles[c].conformal_threshold for c in class_keys],
+            dtype=torch.float32,
+            device=device,
+        )
+        valid_tau = (thresholds > 0.0) & torch.isfinite(thresholds)
+        safe_thresholds = torch.where(valid_tau, thresholds, torch.ones_like(thresholds))
+        norm_dist_matrix = dist_matrix / safe_thresholds.unsqueeze(0)
+        best_indices = torch.argmin(norm_dist_matrix, dim=1)
+        accepted_mask = dist_matrix <= thresholds.unsqueeze(0)
+
+        preds, is_unk_list, cand_list, norm_scores, raw_scores, tau_used, pred_sets = [], [], [], [], [], [], []
+        for i in range(len(x)):
+            best_idx = int(best_indices[i].item())
+            cand_c = class_keys[best_idx]
+            pset = [class_keys[j] for j in range(len(class_keys)) if bool(accepted_mask[i, j].item())]
+            is_unk = len(pset) == 0
+            preds.append(self.unknown_label if is_unk else cand_c)
+            is_unk_list.append(is_unk)
+            cand_list.append(cand_c)
+            norm_scores.append(float(norm_dist_matrix[i, best_idx].item()))
+            raw_scores.append(float(dist_matrix[i, best_idx].item()))
+            tau_used.append(float(thresholds[best_idx].item()))
+            pred_sets.append(pset)
+
+        return {
+            "predictions": np.array(preds, dtype=np.int64),
+            "is_unknown": np.array(is_unk_list, dtype=bool),
+            "candidate_classes": np.array(cand_list, dtype=np.int64),
+            "normalized_scores": np.array(norm_scores, dtype=np.float32),
+            "raw_scores": np.array(raw_scores, dtype=np.float32),
+            "thresholds_used": np.array(tau_used, dtype=np.float32),
+            "prediction_sets": pred_sets,
+            "latent_z": z_batch.detach().cpu().numpy(),
+        }
+
