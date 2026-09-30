@@ -2,8 +2,8 @@
 
 Executes:
   - Phase I: Representation Learning with Drift Control & Cosine Annealing (Equations 1-11)
-  - Phase II: Byzantine-Robust Class Profiling via Law of Total Variance (Equations 12-18 & 22-23)
-  - Phase III: Wire-Speed Conformal Edge Detection with Block-Diagonal Mahalanobis (Equations 19-21 & 26-27)
+  - Phase II: Zero-Leakage Federated Class Profiling via Law of Total Variance
+  - Phase III: Wire-Speed Conformal Edge Detection with Block-Diagonal Mahalanobis
 """
 
 from __future__ import annotations
@@ -31,9 +31,6 @@ from src.data.partitioning import partition_dirichlet_non_iid
 from src.data.base import FlowDataset
 from src.federated.client import FederatedClient
 from src.federated.server import FederatedServer
-from src.osr.weibull_evt import WeibullEVTFitter
-from src.osr.conformal import MondrianConformalCalibrator
-from src.osr.edge_inference import EdgeInferenceEngine
 from src.osr.block_mahalanobis import WireSpeedEdgeDetector
 from src.metrics.classification import compute_classification_metrics
 from src.metrics.osr_metrics import compute_osr_metrics
@@ -113,7 +110,7 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
     # PHASE I: Representation Learning with Drift Control (Equations 1-11)
     # =========================================================================
     num_rounds = config.federated.num_rounds
-    logger.info(f"--- [Phase I] Starting {num_rounds} communication rounds with Cosine Annealed SGD & Anchor Gating ---")
+    logger.info(f"--- [Phase I] Starting {num_rounds} communication rounds with Cosine Annealed SGD & Decoupled Aggregation ---")
 
     for r in range(1, num_rounds + 1):
         round_loss = server.run_round(r)
@@ -122,15 +119,14 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
         if r % 10 == 0 or r == num_rounds:
             logger.info(
                 f"Round [{r:03d}/{num_rounds:03d}] | Total Loss: {round_loss.get('loss_total', 0.0):.4f} "
-                f"| CB Loss: {round_loss.get('loss_cb', 0.0):.4f} | VIB Loss: {round_loss.get('loss_vib', 0.0):.4f} "
-                f"| Anchor Loss: {round_loss.get('loss_anchor', 0.0):.4f} | LR: {round_loss.get('lr_scheduled', 0.0):.6f}"
+                f"| BLA Loss: {round_loss.get('loss_bla', 0.0):.4f} | VIB Loss: {round_loss.get('loss_vib', 0.0):.4f} "
+                f"| LR: {round_loss.get('lr_scheduled', 0.0):.6f}"
             )
             if config.experiment.save_checkpoints:
                 checkpoint_mgr.save_checkpoint(
                     round_idx=r,
                     model_state_dict=server.global_model.state_dict(),
-                    dual_multipliers=server.dual_multipliers,
-                    global_prototypes=server.global_prototypes,
+                    global_prototypes=getattr(server, "global_prototypes", None),
                 )
 
     # Freeze Global Encoder permanently: theta_g^* = theta_g^T (Algorithm 1 Line 7)
@@ -138,16 +134,13 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
     logger.info("--- [Phase I Completed] Global encoder theta_g^* frozen permanently ---")
 
     # =========================================================================
-    # PHASE II: Byzantine-Robust Profiling via Law of Total Variance (Equations 12-18)
+    # PHASE II: Zero-Leakage Federated Class Profiling via Law of Total Variance
     # =========================================================================
-    logger.info("--- [Phase II] Extracting sub-block moments and running Byzantine MAD + Total Variance aggregation ---")
+    logger.info("--- [Phase II] Extracting sub-block moments and running Law of Total Variance aggregation ---")
     global_profiles = server.run_phase_two_profiling(
         num_blocks=config.federated.num_blocks,
         block_dim=config.federated.block_dim,
         alpha=config.osr.conformal_alpha,
-        apply_mad_filter=True,
-        mad_gamma_0=config.federated.mad_gamma_0,
-        mad_zeta=config.federated.mad_zeta,
     )
     logger.info(f"Synthesized exact global profiles for {len(global_profiles)} known classes via Theorem 1")
 
@@ -176,75 +169,21 @@ def run_experiment(config_path: str = "configs/default.yaml", override_rounds: i
 
     logger.info("=== Wire-Speed Block-Diagonal Mahalanobis Evaluation (Phase III) ===")
     logger.info(f"Open-Set AUROC (Mahalanobis): {mahalanobis_osr_metrics['auroc'] * 100.0:.2f}%")
+    logger.info(f"Open-Set AUPR: {mahalanobis_osr_metrics['aupr'] * 100.0:.2f}%")
     logger.info(f"Open-Set Macro F1: {mahalanobis_osr_metrics['open_set_macro_f1'] * 100.0:.2f}%")
-    logger.info(f"False Alarm Rate (FAR): {mahalanobis_osr_metrics['false_alarm_rate'] * 100.0:.2f}% (Nominal Bound <= {config.osr.conformal_alpha * 100:.1f}%)")
-
-    # Baseline multi-stage evaluation (Weibull EVT + Energy + Conformal)
-    logger.info("Evaluating baseline multi-stage engine for comparison...")
-    weibull_fitter = WeibullEVTFitter(tail_size=config.osr.weibull_tail_size)
-    weibull_fitter.fit(
-        features=train_ds.features,
-        labels=train_ds.labels,
-        prototypes=server.global_prototypes,
-        model=server.global_model,
-    )
-
-    cal_loader = torch.utils.data.DataLoader(cal_ds, batch_size=256, shuffle=False)
-    cal_probs_list, cal_labels_list = [], []
-    with torch.no_grad():
-        for x_b, y_b in cal_loader:
-            logits, _, _, _, _ = server.global_model(x_b.to(device))
-            probs = torch.softmax(logits, dim=-1).cpu()
-            cal_probs_list.append(probs)
-            cal_labels_list.append(y_b)
-
-    all_cal_probs = torch.cat(cal_probs_list, dim=0)
-    all_cal_labels = torch.cat(cal_labels_list, dim=0)
-
-    conformal_calibrator = MondrianConformalCalibrator(alpha=config.osr.conformal_alpha)
-    conformal_calibrator.calibrate(
-        cal_probabilities=all_cal_probs,
-        cal_labels=all_cal_labels,
-        num_classes=num_known,
-    )
-
-    engine = EdgeInferenceEngine(
-        model=server.global_model,
-        prototypes=server.global_prototypes,
-        weibull_models=weibull_fitter.weibull_models,
-        conformal_calibrator=conformal_calibrator,
-        unknown_class_id=num_known,
-        energy_temperature=config.osr.energy_temperature,
-    )
-
-    preds, conf_sets, energies, unknown_probs = engine.predict_batch(test_open_ds.features)
-    baseline_osr_metrics = compute_osr_metrics(
-        y_true=y_test_true,
-        y_pred=preds,
-        anomaly_scores=unknown_probs,
-        num_known_classes=num_known,
-        unknown_label=num_known,
-    )
-
-    conformal_eval = compute_conformal_metrics(
-        prediction_sets=conf_sets,
-        y_true=y_test_true,
-        target_coverage=1.0 - config.osr.conformal_alpha,
-    )
+    logger.info(f"Known False Rejection Rate (KFR): {mahalanobis_osr_metrics['kfr'] * 100.0:.2f}% (Target <= {config.osr.conformal_alpha * 100:.1f}%)")
 
     final_results = {
         "mahalanobis_auroc": mahalanobis_osr_metrics["auroc"],
+        "mahalanobis_aupr": mahalanobis_osr_metrics["aupr"],
         "mahalanobis_f1": mahalanobis_osr_metrics["open_set_macro_f1"],
-        "mahalanobis_far": mahalanobis_osr_metrics["false_alarm_rate"],
-        "baseline_auroc": baseline_osr_metrics["auroc"],
-        "baseline_f1": baseline_osr_metrics["open_set_macro_f1"],
-        "conformal_empirical_coverage": conformal_eval["empirical_coverage"],
+        "mahalanobis_kfr": mahalanobis_osr_metrics["kfr"],
     }
 
     # Persist Artifacts and Plots
     tracker.finish_run(final_results=final_results)
     plot_convergence_curves(tracker.history, tracker.run_dir / "convergence.png")
-    plot_conformal_set_distribution(conf_sets, tracker.run_dir / "conformal_distribution.png")
+    # plot_conformal_set_distribution(conf_sets, tracker.run_dir / "conformal_distribution.png")
     logger.info(f"Experiment finished successfully! Results saved to: {tracker.run_dir}")
 
 

@@ -31,7 +31,7 @@ from src.data.tabular_p2p import load_benchmark_dataset, BENCHMARK_METADATA
 from src.data.osr_split import split_open_set_dataset
 from src.data.partitioning import partition_dirichlet_non_iid
 from src.data.base import FlowDataset
-from src.federated.client import FederatedClient
+from src.federated.client import FederatedClient, extract_latent_mu
 from src.federated.server import FederatedServer
 from src.aggregation.total_variance import GlobalClassProfile
 from src.osr.block_mahalanobis import WireSpeedEdgeDetector, compute_block_mahalanobis_distances
@@ -128,7 +128,6 @@ def run_conformal_sweep_experiment(
         num_blocks=num_blocks,
         block_dim=block_dim,
         alpha=0.05,
-        apply_mad_filter=True,
     )
 
     # Extract calibration embeddings
@@ -137,8 +136,7 @@ def run_conformal_sweep_experiment(
     with torch.no_grad():
         for cx, cy in cal_loader:
             cx_dev = cx.to(device)
-            out = server.global_model.encoder(cx_dev)
-            mu_enc = out[3] if isinstance(out, tuple) and len(out) >= 4 else (out[0] if isinstance(out, tuple) else out)
+            mu_enc = extract_latent_mu(server.global_model.encoder, cx_dev)
             cal_z_list.append(mu_enc.cpu())
             cal_y_list.append(cy.cpu())
     cal_z = torch.cat(cal_z_list, dim=0)

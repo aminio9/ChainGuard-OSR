@@ -19,7 +19,7 @@ root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from typing import Dict
+from typing import Dict, Optional
 import torch
 
 from src.config import load_config
@@ -27,8 +27,7 @@ from src.tracking.reproducibility import set_seed
 from src.tracking.logger import setup_logger
 from src.utils.device import get_device
 from src.utils.io import save_json
-from src.data.synthetic import generate_synthetic_p2p_data
-from src.data.tabular_p2p import load_p2p_tabular_dataset
+from src.data.tabular_p2p import load_benchmark_dataset, BENCHMARK_METADATA
 from src.data.osr_split import split_open_set_dataset
 from src.data.partitioning import partition_dirichlet_non_iid
 from src.data.base import FlowDataset
@@ -45,6 +44,7 @@ def evaluate_loao_attack(
     config_path: str = "configs/default.yaml",
     rounds: int = 15,
     beta_dirichlet: float = 0.5,
+    max_samples: Optional[int] = None,
 ) -> Dict[str, float]:
     """Execute complete 3-phase training and evaluation for a specific LOAO attack holdout."""
     config = load_config(config_path)
@@ -56,12 +56,11 @@ def evaluate_loao_attack(
     set_seed(config.experiment.seed)
     device = get_device(config.experiment.device)
 
-    # 1. Dataset loading / generation
-    raw_dataset = generate_synthetic_p2p_data(
-        num_samples=config.data.num_samples or 3000,
-        in_features=config.data.in_features,
-        num_classes=max(known_classes + unknown_classes) + 1,
-        seed=config.experiment.seed,
+    # 1. Dataset loading: Load real B-NAT benchmark from data/raw
+    raw_dataset, meta = load_benchmark_dataset(
+        dataset_name="b_nat",
+        data_dir="data/raw",
+        samples_per_class=max_samples,
     )
 
     train_ds, cal_ds, _, test_open_ds = split_open_set_dataset(
@@ -72,6 +71,7 @@ def evaluate_loao_attack(
         cal_ratio=config.data.cal_split_ratio,
         seed=config.experiment.seed,
     )
+    config.model.in_features = train_ds.features.shape[1]
 
     # 2. Non-IID Dirichlet Partition
     client_indices = partition_dirichlet_non_iid(
@@ -99,12 +99,11 @@ def evaluate_loao_attack(
 
     num_known = len(known_classes)
 
-    # 4. Phase II: Byzantine-Robust Profiling via Law of Total Variance
+    # 4. Phase II: Zero-Leakage Federated Class Profiling via Law of Total Variance
     server.run_phase_two_profiling(
         num_blocks=config.federated.num_blocks,
         block_dim=config.federated.block_dim,
         alpha=config.osr.conformal_alpha,
-        apply_mad_filter=True,
     )
 
     # 5. Phase III: Wire-Speed Block-Diagonal Mahalanobis Edge Detector
@@ -131,18 +130,19 @@ def run_loao_suite(
     rounds: int = 10,
     beta_dirichlet: float = 0.5,
     output_dir: str = "results/loao",
+    max_samples: Optional[int] = None,
 ) -> None:
     """Run Leave-One-Attack-Out across BP, DoS, FoT, MitM matching Table 6."""
     logger = setup_logger(name="loao_runner")
     logger.info(f"Starting Leave-One-Attack-Out (LOAO) suite (rounds={rounds}, beta={beta_dirichlet})...")
 
-    # B-NAT classes: 0: Normal, 1: BP, 2: DoS, 3: FoT, 4: MitM
+    # B-NAT classes: 0: Normal, 1: BP, 2: DoS, 3: MitM, 4: FoT
     # Each run sequesters one attack as C_U and retains the remaining 4 as C_K
     attacks = {
         "BP": {"known": [0, 2, 3, 4], "unknown": [1]},
         "DoS": {"known": [0, 1, 3, 4], "unknown": [2]},
-        "FoT": {"known": [0, 1, 2, 4], "unknown": [3]},
-        "MitM": {"known": [0, 1, 2, 3], "unknown": [4]},
+        "MitM": {"known": [0, 1, 2, 4], "unknown": [3]},
+        "FoT": {"known": [0, 1, 2, 3], "unknown": [4]},
     }
 
     results: Dict[str, Dict[str, float]] = {}
@@ -155,6 +155,7 @@ def run_loao_suite(
             unknown_classes=splits["unknown"],
             rounds=rounds,
             beta_dirichlet=beta_dirichlet,
+            max_samples=max_samples,
         )
         results[attack_name] = metrics
         logger.info(
@@ -180,11 +181,15 @@ def run_loao_suite(
     logger.info(f"LOAO benchmarking completed. Table written to {out_p}")
 
 
+run_loao_benchmark = run_loao_suite
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Leave-One-Attack-Out Evaluation")
     parser.add_argument("--rounds", type=int, default=10, help="Rounds per attack holdout")
     parser.add_argument("--beta", type=float, default=0.5, help="Dirichlet concentration alpha_D (paper default: 0.5)")
+    parser.add_argument("--max_samples", type=int, default=None, help="Max samples per class limit")
     parser.add_argument("--output_dir", type=str, default="results/loao")
     args = parser.parse_args()
 
-    run_loao_suite(rounds=args.rounds, beta_dirichlet=args.beta, output_dir=args.output_dir)
+    run_loao_suite(rounds=args.rounds, beta_dirichlet=args.beta, output_dir=args.output_dir, max_samples=args.max_samples)

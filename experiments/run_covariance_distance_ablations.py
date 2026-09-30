@@ -29,10 +29,13 @@ from src.data.tabular_p2p import load_benchmark_dataset, BENCHMARK_METADATA
 from src.data.osr_split import split_open_set_dataset
 from src.data.partitioning import partition_dirichlet_non_iid
 from src.data.base import FlowDataset
-from src.federated.client import FederatedClient
+from src.federated.client import FederatedClient, extract_latent_mu
 from src.federated.server import FederatedServer
-from src.aggregation.total_variance import aggregate_total_variance_moments, GlobalClassProfile
-from src.aggregation.byzantine_mad import ClientClassMoment
+from src.aggregation.total_variance import (
+    ClientClassMoment,
+    GlobalClassProfile,
+    aggregate_total_variance_moments,
+)
 from src.osr.block_mahalanobis import WireSpeedEdgeDetector, compute_block_mahalanobis_distances
 from src.osr.conformal import compute_finite_sample_quantile
 from src.metrics.osr_metrics import compute_osr_metrics
@@ -143,8 +146,7 @@ def run_covariance_distance_ablations(
     with torch.no_grad():
         for cx, cy in cal_loader:
             cx_dev = cx.to(device)
-            out = server.global_model.encoder(cx_dev)
-            mu_enc = out[3] if isinstance(out, tuple) and len(out) >= 4 else (out[0] if isinstance(out, tuple) else out)
+            mu_enc = extract_latent_mu(server.global_model.encoder, cx_dev)
             cal_z_list.append(mu_enc.cpu())
             cal_y_list.append(cy.cpu())
     cal_z = torch.cat(cal_z_list, dim=0)
@@ -154,8 +156,7 @@ def run_covariance_distance_ablations(
     with torch.no_grad():
         for tx, ty in test_loader:
             tx_dev = tx.to(device)
-            out = server.global_model.encoder(tx_dev)
-            mu_enc = out[3] if isinstance(out, tuple) and len(out) >= 4 else (out[0] if isinstance(out, tuple) else out)
+            mu_enc = extract_latent_mu(server.global_model.encoder, tx_dev)
             test_z_list.append(mu_enc.cpu())
             test_y_list.append(ty.cpu())
     test_z = torch.cat(test_z_list, dim=0)
@@ -170,11 +171,10 @@ def run_covariance_distance_ablations(
     logger.info("\n--- Evaluating Ablation A4: Covariance Aggregation Strategies ---")
 
     # Strategy 1: Proposed Exact Law of Total Variance (Theorem 1)
-    tot_var_profiles, _ = aggregate_total_variance_moments(
+    tot_var_profiles = aggregate_total_variance_moments(
         class_submissions=client_moments_map,
         num_blocks=num_blocks,
         block_dim=block_dim,
-        apply_mad_filter=True,
     )
     # Calibrate
     calibrated_tot_var = {}
@@ -198,7 +198,12 @@ def run_covariance_distance_ablations(
         block_covs = []
         inv_covs = []
         for b in range(num_blocks):
-            cov_b = sum(s.sample_count * s.block_covs[b] for s in subs) / max(total_n, 1) + 1e-4 * torch.eye(block_dim)
+            valid_subs = [s for s in subs if b < len(s.block_covs)]
+            valid_n = sum(s.sample_count for s in valid_subs)
+            if valid_subs and valid_n > 0:
+                cov_b = sum(s.sample_count * s.block_covs[b] for s in valid_subs) / max(valid_n, 1) + 1e-4 * torch.eye(block_dim)
+            else:
+                cov_b = torch.eye(block_dim)
             block_covs.append(cov_b)
             inv_covs.append(torch.linalg.pinv(cov_b))
         prof = GlobalClassProfile(

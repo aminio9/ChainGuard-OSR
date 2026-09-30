@@ -143,9 +143,6 @@ def run_scalability_experiment(
             num_blocks=config.federated.num_blocks,
             block_dim=config.federated.block_dim,
             alpha=config.osr.conformal_alpha,
-            apply_mad_filter=True,
-            mad_gamma_0=config.federated.mad_gamma_0,
-            mad_zeta=config.federated.mad_zeta,
         )
 
         edge_detector = server.get_edge_detector(
@@ -168,7 +165,10 @@ def run_scalability_experiment(
             unknown_label=num_known,
         )
 
-        preds_closed, _, _, _ = edge_detector.predict_batch(test_closed_ds.features)
+        with torch.no_grad():
+            x_closed = test_closed_ds.features.to(device)
+            logits_closed = server.global_model.classify(x_closed)
+            preds_closed = torch.argmax(logits_closed, dim=-1).cpu().numpy()
         y_closed_true = test_closed_ds.labels.numpy()
         closed_metrics = compute_classification_metrics(
             y_true=y_closed_true,
@@ -176,18 +176,36 @@ def run_scalability_experiment(
             num_classes=num_known,
         )
 
+        # Compute exact communication payload
+        num_params = sum(p.numel() for p in server.global_model.parameters())
+        phase1_comm_bytes = int(2 * num_params * 4 * rounds)  # Uplink + downlink
+        num_blocks = config.federated.num_blocks
+        block_dim = config.federated.block_dim
+        latent_dim = config.model.latent_dim
+        phase2_comm_bytes = int(num_known * (latent_dim + num_blocks * (block_dim ** 2) + 2) * 4)
+
         k_results = {
+            "experiment_id": f"E7_scalability_K{K}",
+            "client_count": K,
             "num_clients": K,
+            "phase1_wall_time_sec": float(stage1_duration),
+            "phase2_wall_time_sec": float(stage2_duration),
+            "stage1_time_sec": float(stage1_duration),
+            "stage2_time_sec": float(stage2_duration),
+            "total_time_sec": float(total_duration),
+            "total_wall_time_sec": float(total_duration),
+            "phase1_comm_bytes_per_client": phase1_comm_bytes,
+            "phase2_comm_bytes_per_client": phase2_comm_bytes,
+            "realized_kfr": float(osr_metrics["kfr"]),
+            "kfr": float(osr_metrics["kfr"]),
+            "macro_f1_closed": float(closed_metrics["macro_f1"]),
+            "closed_accuracy": float(closed_metrics["accuracy"]),
+            "auroc_open": float(osr_metrics["auroc"]),
             "auroc": float(osr_metrics["auroc"]),
             "aupr": float(osr_metrics["aupr"]),
             "unknown_recall": float(osr_metrics["unknown_recall"]),
             "unknown_f1": float(osr_metrics["unknown_f1"]),
             "open_set_macro_f1": float(osr_metrics["open_set_macro_f1"]),
-            "kfr": float(osr_metrics["kfr"]),
-            "closed_accuracy": float(closed_metrics["accuracy"]),
-            "stage1_time_sec": float(stage1_duration),
-            "stage2_time_sec": float(stage2_duration),
-            "total_time_sec": float(total_duration),
         }
 
         results[f"K_{K}"] = k_results
@@ -195,14 +213,14 @@ def run_scalability_experiment(
             f"--> [K={K}] AUROC: {k_results['auroc']*100:.2f}% | "
             f"Unk-F1: {k_results['unknown_f1']*100:.2f}% | "
             f"OS Macro-F1: {k_results['open_set_macro_f1']*100:.2f}% | "
-            f"KFR: {k_results['kfr']*100:.2f}% | "
-            f"Stage I: {stage1_duration:.2f}s | "
-            f"Stage II: {stage2_duration:.2f}s | "
-            f"Total: {total_duration:.2f}s"
+            f"Realized KFR: {k_results['realized_kfr']*100:.2f}% | "
+            f"Phase I: {stage1_duration:.2f}s ({phase1_comm_bytes/1e6:.2f} MB) | "
+            f"Phase II: {stage2_duration:.2f}s ({phase2_comm_bytes/1e3:.1f} KB)"
         )
 
-    # Save JSON summary
+    # Save JSON summary & Q1 structured audit log
     save_json(results, out_p / "client_scalability_summary.json")
+    save_json(results, out_p / "q1_scalability_log.json")
 
     # Generate LaTeX table matching Table 11
     latex_tbl = generate_scalability_latex_table(results)

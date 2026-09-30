@@ -78,9 +78,9 @@ def run_benchmark_trial(
         "federated": {
             "num_rounds": rounds,
             "partition": {"beta_dirichlet": beta_dirichlet},
-            # Ensure block_dim * num_blocks == latent_dim (64)
-            "num_blocks": 8,
-            "block_dim": 8,
+            # Canonical paper configuration: B = 4 diagonal blocks of d_b = 16 (Section 5.3)
+            "num_blocks": 4,
+            "block_dim": 16,
         },
     }
 
@@ -97,6 +97,7 @@ def run_benchmark_trial(
         cal_ratio=config.data.cal_split_ratio,
         seed=config.experiment.seed,
     )
+    config.model.in_features = train_ds.features.shape[1]
 
     logger.info(
         f"Splits -> Train (known only): {len(train_ds)}, Cal (known only): {len(cal_ds)}, "
@@ -128,13 +129,12 @@ def run_benchmark_trial(
 
     server.freeze_global_encoder()
 
-    # 4. Phase II: Byzantine-Robust Profiling via Law of Total Variance
-    logger.info("--- [Phase II] Sub-Block Moment Extraction & Byzantine MAD Aggregation ---")
+    # 4. Phase II: Zero-Leakage Federated Class Profiling via Law of Total Variance
+    logger.info("--- [Phase II] Sub-Block Moment Extraction & Law of Total Variance Aggregation ---")
     server.run_phase_two_profiling(
         num_blocks=config.federated.num_blocks,
         block_dim=config.federated.block_dim,
         alpha=config.osr.conformal_alpha,
-        apply_mad_filter=True,
         cal_dataset=cal_ds,
     )
 
