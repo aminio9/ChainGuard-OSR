@@ -40,9 +40,11 @@ from src.metrics.osr_metrics import compute_osr_metrics
 def run_benchmark_trial(
     dataset_name: str,
     rounds: int = 3,
-    samples_per_class: int = 200,
+    samples_per_class: Optional[int] = None,
     beta_dirichlet: float = 0.5,
     config_path: str = "configs/default.yaml",
+    seed: Optional[int] = None,
+    **kwargs: Any,
 ) -> Dict[str, float]:
     """Execute complete 3-phase training and closed/open-set evaluation on a real benchmark."""
     logger = setup_logger(name=f"bench_{dataset_name}")
@@ -214,7 +216,7 @@ def run_benchmark_trial(
 
 def run_all_four_benchmarks(
     rounds: int = 3,
-    samples_per_class: int = 200,
+    samples_per_class: Optional[int] = None,
     beta_dirichlet: float = 0.5,
     output_dir: str = "results/real_benchmarks",
 ) -> None:
@@ -277,10 +279,40 @@ def run_all_four_benchmarks(
     logger.info(f"All 4 benchmark evaluations completed! Results saved to {out_p}")
 
 
+def run_multi_dataset_benchmark(
+    datasets: Optional[List[str]] = None,
+    rounds: int = 3,
+    samples_per_class: Optional[int] = None,
+    beta_dirichlet: float = 0.5,
+    output_dir: str = "results/real_benchmarks",
+    seed: Optional[int] = None,
+    **kwargs: Any,
+) -> Dict[str, Dict[str, float]]:
+    """Run benchmark evaluation across specified datasets."""
+    if datasets is None:
+        datasets = ["b_nat", "b_tat", "ton_iot", "cic_ids2017"]
+    summary: Dict[str, Dict[str, float]] = {}
+    for ds_name in datasets:
+        res = run_benchmark_trial(
+            dataset_name=ds_name,
+            rounds=rounds,
+            samples_per_class=samples_per_class,
+            beta_dirichlet=beta_dirichlet,
+            seed=seed,
+            **kwargs,
+        )
+        summary[ds_name] = res
+
+    out_p = Path(output_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+    save_json(summary, out_p / "benchmark_summary.json")
+    return summary
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run 4 Real Intrusion Benchmarks")
     parser.add_argument("--rounds", type=int, default=3, help="Federation rounds per benchmark")
-    parser.add_argument("--samples_per_class", type=int, default=200, help="Samples per class for stratified balance")
+    parser.add_argument("--samples_per_class", type=int, default=None, help="Samples per class for stratified balance (default: None = 100% full dataset)")
     parser.add_argument("--beta", type=float, default=0.5, help="Dirichlet concentration alpha_D (default: 0.5)")
     parser.add_argument("--output_dir", type=str, default="results/real_benchmarks")
     args = parser.parse_args()

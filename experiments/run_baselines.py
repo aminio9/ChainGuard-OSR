@@ -12,7 +12,9 @@ Baselines:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 from pathlib import Path
 
 root_dir = Path(__file__).resolve().parent.parent
@@ -85,7 +87,7 @@ MODULAR_BASELINE_REGISTRY = {
 
 def evaluate_method_configuration(
     method_name: str,
-    config_path: str,
+    config_path: str = "configs/default.yaml",
     rounds: int = 15,
     beta_dirichlet: Optional[float] = None,
     samples_per_class: Optional[int] = None,
@@ -93,14 +95,23 @@ def evaluate_method_configuration(
     seed: Optional[int] = None,
     scoring_method: str = "native",
     use_mondrian: bool = False,
+    dataset_name: Optional[str] = None,
+    batch_size: Optional[int] = None,
+    beta: Optional[float] = None,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Execute complete training and 3-phase open-set evaluation for a given method configuration."""
+    if beta_dirichlet is None and beta is not None:
+        beta_dirichlet = beta
+
     overrides: Dict[str, Any] = {}
     if beta_dirichlet is not None:
         overrides.setdefault("federated", {})["partition"] = {"beta_dirichlet": beta_dirichlet}
 
     config = load_config(config_path, overrides=overrides if overrides else None)
     config.federated.num_rounds = rounds
+    if batch_size is not None:
+        config.federated.batch_size = batch_size
     if seed is not None:
         config.experiment.seed = seed
     if beta_dirichlet is not None:
@@ -109,23 +120,28 @@ def evaluate_method_configuration(
         config.federated.partition.strategy = "iid"
         config.federated.partition.beta_dirichlet = 100.0  # Uniform IID partition
 
+    if dataset_name is not None:
+        config.data.dataset_name = dataset_name
+    if "num_clients" in kwargs and kwargs["num_clients"] is not None:
+        config.federated.num_clients = kwargs["num_clients"]
+
     set_seed(config.experiment.seed)
     device = get_device(config.experiment.device)
 
     # 1. Prepare Data
-    dataset_name = config.data.dataset_name.lower().replace("-", "_")
+    target_ds_name = config.data.dataset_name.lower().replace("-", "_")
     spc = samples_per_class if samples_per_class is not None else getattr(config.data, "samples_per_class", None)
 
-    if dataset_name in BENCHMARK_METADATA:
+    if target_ds_name in BENCHMARK_METADATA:
         raw_dataset, meta = load_benchmark_dataset(
-            dataset_name=dataset_name,
+            dataset_name=target_ds_name,
             data_dir="data/raw",
             samples_per_class=spc,
         )
         config.data.known_classes = meta["known_classes"]
         config.data.unknown_classes = meta["unknown_classes"]
         config.data.in_features = meta["in_features"]
-    elif dataset_name == "synthetic_p2p":
+    elif target_ds_name == "synthetic_p2p":
         raw_dataset = generate_synthetic_p2p_data(
             num_samples=config.data.num_samples or 3000,
             in_features=config.data.in_features,
@@ -162,6 +178,7 @@ def evaluate_method_configuration(
         test_ratio=config.data.test_split_ratio,
         cal_ratio=config.data.cal_split_ratio,
         seed=config.experiment.seed,
+        protocol=os.environ.get("OSR_PROTOCOL", "full"),
     )
     config.model.in_features = train_ds.features.shape[1]
 
@@ -198,6 +215,7 @@ def evaluate_method_configuration(
             hidden_dim=config.model.hidden_dim,
             device=device,
         )
+        ckpt_base_dir = Path(kwargs.get("checkpoint_dir", "checkpoints"))
         baseline.fit(
             client_datasets=client_datasets,
             num_rounds=rounds,
@@ -205,6 +223,8 @@ def evaluate_method_configuration(
             batch_size=config.federated.batch_size,
             lr=config.optimization.learning_rate,
             optimizer_name=config.optimization.optimizer,
+            checkpoint_dir=str(ckpt_base_dir / f"{target_ds_name}_b{beta_dirichlet if beta_dirichlet is not None else 'iid'}"),
+            resume=kwargs.get("resume", True),
         )
         res = baseline.evaluate(
             test_open_ds=test_open_ds,
@@ -244,8 +264,55 @@ def evaluate_method_configuration(
     server = FederatedServer(config, clients, device)
 
     # 3. Phase I: Collaborative Federated Training
-    for r in range(1, rounds + 1):
-        server.run_round(r)
+    ckpt_base_dir = Path(kwargs.get("checkpoint_dir", "checkpoints"))
+    method_slug = method_name.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("-", "_")
+    skew_slug = f"b{beta_dirichlet:.2f}" if beta_dirichlet is not None else "iid"
+    ckpt_dir = ckpt_base_dir / f"{target_ds_name}_{method_slug}_{skew_slug}"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    latest_ckpt = ckpt_dir / "checkpoint_latest.pt"
+
+    start_round = 1
+    resume_enabled = kwargs.get("resume", True)
+    if resume_enabled and latest_ckpt.exists():
+        try:
+            saved_state = torch.load(latest_ckpt, map_location=device, weights_only=False)
+            server.global_model.load_state_dict(saved_state["model_state_dict"])
+            saved_r = saved_state.get("round", 0)
+            if saved_r < rounds:
+                start_round = saved_r + 1
+                print(f"    [CHECKPOINT RESUME] Resuming {method_name} from Round {start_round}/{rounds} via {latest_ckpt}...", flush=True)
+            else:
+                print(f"    [CHECKPOINT COMPLETED] Found completed {saved_r}/{rounds} rounds in {latest_ckpt}. Skipping training loop.", flush=True)
+                start_round = rounds + 1
+        except Exception as e:
+            print(f"    [CHECKPOINT WARNING] Could not load {latest_ckpt}: {e}. Starting fresh.", flush=True)
+            start_round = 1
+
+    t_p1_start = time.perf_counter()
+    log_interval = max(1, rounds // 10) if rounds >= 20 else max(1, rounds // 5)
+    for r in range(start_round, rounds + 1):
+        t_r0 = time.perf_counter()
+        r_loss = server.run_round(r)
+        
+        # Save periodic checkpoint to disk / Google Drive
+        if r % log_interval == 0 or r == rounds:
+            torch.save({
+                "round": r,
+                "model_state_dict": server.global_model.state_dict(),
+            }, latest_ckpt)
+
+        if r == 1 or r % log_interval == 0 or r == rounds:
+            elapsed = time.perf_counter() - t_p1_start
+            r_sec = time.perf_counter() - t_r0
+            rounds_done = r - start_round + 1
+            avg_sec = elapsed / max(rounds_done, 1)
+            eta_sec = avg_sec * (rounds - r)
+            loss_val = r_loss.get("train_loss", r_loss.get("loss_bla", 0.0)) if isinstance(r_loss, dict) else 0.0
+            print(
+                f"    [FedTROS-MC] Round {r:3d}/{rounds} | Loss: {loss_val:.4f} | "
+                f"Speed: {r_sec:.2f}s/rnd | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
+                flush=True,
+            )
 
     # Freeze encoder permanently (Section 4.1 & 4.3)
     server.freeze_global_encoder()
@@ -274,101 +341,23 @@ def evaluate_method_configuration(
         )
         return closed_metrics
 
-    osr_method = getattr(config, "osr_method", None)
-    if osr_method is None and hasattr(config, "osr"):
-        osr_method = getattr(config.osr, "osr_method", None)
+    # Phase II: Zero-Leakage Federated Class Profiling via Law of Total Variance (Algorithm 2 Lines 120-132)
+    server.run_phase_two_profiling(
+        num_blocks=config.federated.num_blocks,
+        block_dim=config.federated.block_dim,
+        alpha=config.osr.conformal_alpha,
+    )
 
-    if osr_method in ("maximum_softmax_probability", "msp"):
-        server.global_model.eval()
-        with torch.no_grad():
-            x_cal = cal_ds.features.to(device)
-            logits_cal = server.global_model.classify(x_cal)
-            probs_cal = torch.softmax(logits_cal, dim=-1)
-            msp_cal_scores = (1.0 - torch.max(probs_cal, dim=-1)[0]).cpu().numpy()
-            tau_msp = float(np.percentile(msp_cal_scores, 100.0 * (1.0 - config.osr.conformal_alpha)))
+    # Phase III: Wire-Speed Block-Diagonal Mahalanobis Edge Detector (Algorithm 2 Lines 133-148)
+    edge_detector = server.get_edge_detector(
+        unknown_label=num_known,
+        num_blocks=config.federated.num_blocks,
+        block_dim=config.federated.block_dim,
+    )
 
-            x_open = test_open_ds.features.to(device)
-            logits_open = server.global_model.classify(x_open)
-            probs_open = torch.softmax(logits_open, dim=-1)
-            max_prob, cand_class = torch.max(probs_open, dim=-1)
-            anomaly_scores = (1.0 - max_prob).cpu().numpy()
-            cand_class_np = cand_class.cpu().numpy()
-            preds_open = np.where(anomaly_scores > tau_msp, num_known, cand_class_np)
-
-            x_closed = test_closed_ds.features.to(device)
-            logits_closed = server.global_model.classify(x_closed)
-            preds_closed = torch.argmax(logits_closed, dim=-1).cpu().numpy()
-
-    elif osr_method == "energy_ood":
-        server.global_model.eval()
-        temp = getattr(config, "energy_temperature", 1.0)
-        with torch.no_grad():
-            x_cal = cal_ds.features.to(device)
-            logits_cal = server.global_model.classify(x_cal)
-            energy_cal = (-temp * torch.logsumexp(logits_cal / temp, dim=-1)).cpu().numpy()
-            tau_energy = float(np.percentile(energy_cal, 100.0 * (1.0 - config.osr.conformal_alpha)))
-
-            x_open = test_open_ds.features.to(device)
-            logits_open = server.global_model.classify(x_open)
-            energy_open = (-temp * torch.logsumexp(logits_open / temp, dim=-1)).cpu().numpy()
-            cand_class = torch.argmax(logits_open, dim=-1).cpu().numpy()
-            anomaly_scores = energy_open
-            preds_open = np.where(anomaly_scores > tau_energy, num_known, cand_class)
-
-            x_closed = test_closed_ds.features.to(device)
-            logits_closed = server.global_model.classify(x_closed)
-            preds_closed = torch.argmax(logits_closed, dim=-1).cpu().numpy()
-
-    elif osr_method == "weibull_openmax":
-        from src.osr.weibull_evt import WeibullEVTFitter, compute_evt_probabilities
-        server.global_model.eval()
-        with torch.no_grad():
-            x_cal = cal_ds.features.to(device)
-            y_cal = cal_ds.labels
-            _, _, _, mu_cal, _ = server.global_model(x_cal)
-            prototypes = {}
-            for c in range(num_known):
-                idx_c = torch.where(y_cal == c)[0]
-                if len(idx_c) > 0:
-                    prototypes[c] = mu_cal[idx_c].mean(dim=0)
-                else:
-                    prototypes[c] = torch.zeros(mu_cal.size(1), device=device)
-
-            tail_size = getattr(config, "openmax_tail_size", 20)
-            fitter = WeibullEVTFitter(tail_size=tail_size)
-            fitter.fit(x_cal, y_cal, prototypes, model=server.global_model)
-
-            x_open = test_open_ds.features.to(device)
-            logits_open, _, _, mu_open, _ = server.global_model(x_open)
-            evt_probs = compute_evt_probabilities(mu_open, logits_open, prototypes, fitter.weibull_models)
-            p_unk = evt_probs[:, 0].cpu().numpy()
-            known_probs = evt_probs[:, 1:].cpu().numpy()
-            cand_class = np.argmax(known_probs, axis=-1)
-            anomaly_scores = p_unk
-            preds_open = np.where(p_unk > 0.5, num_known, cand_class)
-
-            x_closed = test_closed_ds.features.to(device)
-            logits_closed = server.global_model.classify(x_closed)
-            preds_closed = torch.argmax(logits_closed, dim=-1).cpu().numpy()
-
-    else:
-        # Phase II: Zero-Leakage Federated Class Profiling via Law of Total Variance
-        server.run_phase_two_profiling(
-            num_blocks=config.federated.num_blocks,
-            block_dim=config.federated.block_dim,
-            alpha=config.osr.conformal_alpha,
-        )
-
-        # Phase III: Wire-Speed Block-Diagonal Mahalanobis Edge Detector
-        edge_detector = server.get_edge_detector(
-            unknown_label=num_known,
-            num_blocks=config.federated.num_blocks,
-            block_dim=config.federated.block_dim,
-        )
-
-        # Evaluate on open-set and closed-set test data using Mahalanobis profiles (g_psi discarded)
-        preds_open, is_unk, cand, anomaly_scores = edge_detector.predict_batch(test_open_ds.features)
-        _, _, preds_closed, _ = edge_detector.predict_batch(test_closed_ds.features)
+    # Evaluate on open-set and closed-set test data using regularized Mahalanobis profiles (g_psi discarded)
+    preds_open, is_unk, cand, anomaly_scores = edge_detector.predict_batch(test_open_ds.features)
+    _, _, preds_closed, _ = edge_detector.predict_batch(test_closed_ds.features)
 
     y_open_true = test_open_ds.labels.numpy()
     metrics = compute_osr_metrics(

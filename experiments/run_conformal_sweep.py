@@ -47,6 +47,8 @@ def run_conformal_sweep_experiment(
     max_samples: Optional[int] = None,
     output_dir: str = "results/conformal_sweep",
     seed: int = 42,
+    num_clients: int = 10,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Execute Mondrian conformal coverage sweep across nominal alpha levels."""
     logger = setup_logger(name="conformal_sweep")
@@ -88,8 +90,10 @@ def run_conformal_sweep_experiment(
     )
 
     config = load_config("configs/default.yaml")
-    config.federated.num_clients = 10
+    config.federated.num_clients = num_clients
     config.federated.num_rounds = rounds
+    if "batch_size" in kwargs and kwargs["batch_size"] is not None:
+        config.federated.batch_size = kwargs["batch_size"]
     config.federated.partition.beta_dirichlet = beta_dirichlet
     config.data.known_classes = known_classes
     config.data.unknown_classes = unknown_classes
@@ -205,6 +209,10 @@ def run_conformal_sweep_experiment(
 
     logger.info(f"Conformal calibration sweep completed. Output written to {out_p}")
     return results
+
+
+# Backward compatibility and Colab runner alias
+run_conformal_sweep = run_conformal_sweep_experiment
 
 
 def generate_conformal_sweep_latex_table(results: Dict[str, Dict[str, Any]]) -> str:

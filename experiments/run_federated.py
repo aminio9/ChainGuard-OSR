@@ -41,7 +41,11 @@ from src.visualization.publication_plots import (
 )
 
 
-def run_experiment(config_path: str = "configs/default.yaml", override_rounds: int | None = None) -> None:
+def run_experiment(
+    config_path: str = "configs/default.yaml",
+    override_rounds: int | None = None,
+    **kwargs: Any,
+) -> None:
     # 1. Load Configuration
     config = load_config(config_path)
     if override_rounds is not None:

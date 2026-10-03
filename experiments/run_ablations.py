@@ -13,6 +13,7 @@ Aligned with LaTeX Section 5.3 & Section 6.5 and IEEE TIFS/TDSC Review Protocol:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -58,11 +59,15 @@ def run_component_ablations(
     beta_dirichlet: float = 0.1,
     samples_per_class: Optional[int] = None,
     output_dir: str = "results/ablations",
+    num_clients: int = 10,
+    seed: int = 42,
+    batch_size: Optional[int] = None,
+    **kwargs: Any,
 ) -> Dict[str, Dict[str, float]]:
     """Run standard component ablation suite."""
     logger = setup_logger(name="ablation_runner")
     logger.info(
-        f"Executing component ablation suite (rounds={rounds}, beta={beta_dirichlet}, samples_per_class={samples_per_class})..."
+        f"Executing component ablation suite (rounds={rounds}, beta={beta_dirichlet}, samples_per_class={samples_per_class}, clients={num_clients})..."
     )
 
     ablations = {
@@ -83,6 +88,9 @@ def run_component_ablations(
             rounds=rounds,
             beta_dirichlet=beta_dirichlet,
             samples_per_class=samples_per_class,
+            num_clients=num_clients,
+            seed=seed,
+            batch_size=batch_size,
         )
         results[name] = metrics
         logger.info(
@@ -114,11 +122,15 @@ def run_bla_ablations(
     beta_dirichlet: float = 0.1,
     samples_per_class: Optional[int] = None,
     output_dir: str = "results/ablations",
+    num_clients: int = 10,
+    seed: int = 42,
+    batch_size: Optional[int] = None,
+    **kwargs: Any,
 ) -> Dict[str, Dict[str, float]]:
     """Run Logit-Adjusted Balanced Risk ablation (A2: tau_la in {0.0, 0.5, 1.0, 1.5, 2.0})."""
     logger = setup_logger(name="bla_ablation")
     logger.info(
-        f"Executing Logit-Adjusted Balanced Risk ablation (A2, beta={beta_dirichlet}, samples_per_class={samples_per_class})..."
+        f"Executing Logit-Adjusted Balanced Risk ablation (A2, beta={beta_dirichlet}, samples_per_class={samples_per_class}, clients={num_clients})..."
     )
 
     bla_variants = {
@@ -146,6 +158,9 @@ def run_bla_ablations(
                 rounds=rounds,
                 beta_dirichlet=beta_dirichlet,
                 samples_per_class=samples_per_class,
+                num_clients=num_clients,
+                seed=seed,
+                batch_size=batch_size,
             )
             results[name] = metrics
             logger.info(
@@ -183,9 +198,12 @@ def run_deep_q1_ablations(
     num_clients: int = 10,
     rounds: int = 8,
     beta_dirichlet: float = 0.1,
-    samples_per_class: Optional[int] = 400,
+    samples_per_class: Optional[int] = None,
     output_dir: str = "results/ablations",
     seed: int = 42,
+    vib_betas: Optional[List[float]] = None,
+    batch_size: Optional[int] = None,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Execute detailed Q1 analytical ablations (A1 SVD spectrum, A4 Total Variance Frobenius, A5 Block Size, A6 Conformal, LDP + MIA)."""
     logger = setup_logger(name="deep_q1_ablations")
@@ -210,6 +228,7 @@ def run_deep_q1_ablations(
         test_ratio=0.2,
         cal_ratio=0.15,
         seed=seed,
+        protocol=os.environ.get("OSR_PROTOCOL", "full"),
     )
 
     client_indices = partition_dirichlet_non_iid(
@@ -224,7 +243,8 @@ def run_deep_q1_ablations(
     # Ablation A1: VIB Regularization & Latent SVD Singular Value Spectrum
     # -------------------------------------------------------------------------
     logger.info("Running Ablation A1: VIB Regularization & SVD Singular Value Spectrum...")
-    vib_betas = [0.0, 1e-4, 1e-3, 5e-3, 1e-2, 1e-1]
+    if vib_betas is None:
+        vib_betas = [0.0, 1e-4, 1e-3, 5e-3, 1e-2, 1e-1]
     a1_summary: Dict[str, Any] = {}
     a1_arrays: Dict[str, np.ndarray] = {}
 
@@ -235,6 +255,8 @@ def run_deep_q1_ablations(
         cfg = load_config("configs/default.yaml")
         cfg.federated.num_clients = num_clients
         cfg.federated.num_rounds = rounds
+        if batch_size is not None:
+            cfg.federated.batch_size = batch_size
         cfg.data.known_classes = known_classes
         cfg.data.unknown_classes = unknown_classes
         cfg.model.in_features = train_ds.features.shape[1]
@@ -276,7 +298,7 @@ def run_deep_q1_ablations(
             clients_ref = clients
 
     assert server_ref is not None
-    device = get_device("cpu")
+    device = next(server_ref.global_model.parameters()).device
     num_blocks = 4
     block_dim = 16
 

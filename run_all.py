@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import tracemalloc
@@ -16,7 +17,6 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
-from sklearn.metrics import confusion_matrix
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -29,7 +29,7 @@ from src.data.tabular_p2p import load_benchmark_dataset
 from src.federated.client import FederatedClient
 from src.federated.server import FederatedServer
 from src.metrics.classification import compute_classification_metrics
-from src.metrics.osr_metrics import compute_osr_metrics
+from src.metrics.osr_metrics import compute_confusion_matrix as confusion_matrix, compute_osr_metrics
 from src.tracking.reproducibility import set_seed
 from src.utils.artifact_logger import aggregate_MultiSeed_Summary, save_seed_run_artifacts
 from src.utils.device import get_device
@@ -51,6 +51,8 @@ def run_fedtros_mc_full_diagnostics(
     lambda_vib: Optional[float] = None,
     use_bla: bool = True,
     enable_conformal: bool = True,
+    batch_size: Optional[int] = None,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Run FedTROS-MC end-to-end and save full per-seed diagnostics for plotting."""
     cfg = load_config(str(PROJECT_ROOT / "configs" / "default.yaml"))
@@ -61,6 +63,8 @@ def run_fedtros_mc_full_diagnostics(
     cfg.federated.num_blocks = num_blocks
     cfg.federated.block_dim = block_dim
     cfg.federated.partition.beta_dirichlet = beta_dirichlet
+    if batch_size is not None:
+        cfg.federated.batch_size = batch_size
     cfg.loss.tau_bla = 1.0 if use_bla else 0.0
     cfg.osr.enable_conformal = enable_conformal
     if lambda_vib is not None:
@@ -86,8 +90,9 @@ def run_fedtros_mc_full_diagnostics(
         test_ratio=cfg.data.test_split_ratio,
         cal_ratio=cfg.data.cal_split_ratio,
         seed=seed,
-        protocol="paper_table1" if dataset_name == "b_nat" and samples_per_class is None else "full",
+        protocol="full",
     )
+    cfg.data.in_features = int(train_ds.features.shape[1])
     cfg.model.in_features = int(train_ds.features.shape[1])
 
     client_indices = partition_dirichlet_non_iid(
@@ -109,7 +114,10 @@ def run_fedtros_mc_full_diagnostics(
 
     round_history: List[Dict[str, Any]] = []
     num_known = len(cfg.data.known_classes)
+    t_p1_start = time.perf_counter()
+    log_interval = max(1, rounds // 10) if rounds >= 20 else max(1, rounds // 5)
     for r in range(1, rounds + 1):
+        t_r0 = time.perf_counter()
         r_loss = server.run_round(r)
         with torch.no_grad():
             logits_c = server.global_model.classify(test_closed_ds.features.to(device))
@@ -118,6 +126,17 @@ def run_fedtros_mc_full_diagnostics(
         r_entry = dict(r_loss)
         r_entry["val_closed_accuracy"] = c_acc
         round_history.append(r_entry)
+        if r == 1 or r % log_interval == 0 or r == rounds:
+            elapsed = time.perf_counter() - t_p1_start
+            r_sec = time.perf_counter() - t_r0
+            avg_sec = elapsed / r
+            eta_sec = avg_sec * (rounds - r)
+            loss_val = r_loss.get("train_loss", r_loss.get("loss_bla", 0.0)) if isinstance(r_loss, dict) else 0.0
+            print(
+                f"    [FedTROS-MC] Round {r:3d}/{rounds} | Loss: {loss_val:.4f} | Val Acc: {c_acc * 100:.2f}% | "
+                f"Speed: {r_sec:.2f}s/rnd | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
+                flush=True,
+            )
 
     t_phase1 = time.perf_counter() - t0
     t1 = time.perf_counter()
@@ -143,6 +162,12 @@ def run_fedtros_mc_full_diagnostics(
         num_known_classes=num_known,
         unknown_label=num_known,
     )
+    from src.metrics.osr_metrics import compute_binary_auroc, compute_fpr95
+    y_bin = (y_open_true == num_known).astype(int)
+    osr_metrics["auroc_normalized"] = float(osr_metrics["auroc"])
+    osr_metrics["fpr95_normalized"] = float(osr_metrics["fpr95"])
+    osr_metrics["auroc_raw"] = float(compute_binary_auroc(y_bin, det["raw_scores"]))
+    osr_metrics["fpr95_raw"] = float(compute_fpr95(y_bin, det["raw_scores"]))
 
     with torch.no_grad():
         logits_closed = server.global_model.classify(test_closed_ds.features.to(device))
@@ -227,12 +252,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run all FedTROS-MC experiments and save structured results.")
     parser.add_argument("--mode", choices=["debug", "full"], default="debug")
     parser.add_argument("--seeds", type=str, default="42")
+    parser.add_argument("--rounds", type=int, default=None, help="Optional override for communication rounds")
+    parser.add_argument("--spc", type=int, default=None, help="Optional override for samples per class")
     parser.add_argument("--output_root", type=str, default="results/runs_v2")
     args = parser.parse_args()
 
     seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
-    rounds = 2 if args.mode == "debug" else 100
-    spc = 100 if args.mode == "debug" else None
+    rounds = args.rounds if args.rounds is not None else (2 if args.mode == "debug" else 5)
+    spc = args.spc if args.spc is not None else (100 if args.mode == "debug" else None)
     out_root = Path(args.output_root)
 
     for seed in seeds:
@@ -310,8 +337,8 @@ def main() -> None:
     finalize_real_plot_contract(
         results_root=out_root,
         contract_dir=contract_dir,
-        rounds=max(rounds, 5),
-        spc=150 if args.mode == "debug" else None,
+        rounds=max(rounds, 4),
+        spc=150 if args.mode == "debug" else spc,
         seed=seeds[0],
     )
     print(f"[SUCCESS] Structured experiment outputs and plot contract saved under: {out_root}")

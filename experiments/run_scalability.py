@@ -10,6 +10,7 @@ Evaluates:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -46,6 +47,8 @@ def run_scalability_experiment(
     max_samples: Optional[int] = None,
     output_dir: str = "results/scalability",
     seed: int = 42,
+    batch_size: Optional[int] = None,
+    **kwargs: Any,
 ) -> Dict[str, Dict[str, Any]]:
     """Execute scalability benchmark across federation scale K in {10, 50, 100}."""
     logger = setup_logger(name="scalability_runner")
@@ -89,6 +92,7 @@ def run_scalability_experiment(
         test_ratio=0.2,
         cal_ratio=0.15,
         seed=seed,
+        protocol=os.environ.get("OSR_PROTOCOL", "full"),
     )
 
     results: Dict[str, Dict[str, Any]] = {}
@@ -103,6 +107,8 @@ def run_scalability_experiment(
         config = load_config("configs/default.yaml")
         config.federated.num_clients = K
         config.federated.num_rounds = rounds
+        if batch_size is not None:
+            config.federated.batch_size = batch_size
         config.federated.partition.beta_dirichlet = beta_dirichlet
         config.data.known_classes = known_classes
         config.data.unknown_classes = unknown_classes
@@ -130,8 +136,21 @@ def run_scalability_experiment(
 
         # --- Stage I: Federated Collaborative Training ---
         stage1_start = time.perf_counter()
+        log_interval = max(1, rounds // 10) if rounds >= 20 else max(1, rounds // 5)
         for r in range(1, rounds + 1):
-            server.run_round(r)
+            t_r0 = time.perf_counter()
+            r_loss = server.run_round(r)
+            if r == 1 or r % log_interval == 0 or r == rounds:
+                elapsed = time.perf_counter() - stage1_start
+                r_sec = time.perf_counter() - t_r0
+                avg_sec = elapsed / r
+                eta_sec = avg_sec * (rounds - r)
+                loss_val = r_loss.get("train_loss", r_loss.get("loss_bla", 0.0)) if isinstance(r_loss, dict) else 0.0
+                print(
+                    f"    [Scalability-K={K}] Round {r:3d}/{rounds} | Loss: {loss_val:.4f} | "
+                    f"Speed: {r_sec:.2f}s/rnd | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
+                    flush=True,
+                )
         server.freeze_global_encoder()
         stage1_duration = time.perf_counter() - stage1_start
 

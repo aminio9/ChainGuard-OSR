@@ -48,6 +48,8 @@ def run_covariance_distance_ablations(
     max_samples: Optional[int] = None,
     output_dir: str = "results/ablations_cov_metric",
     seed: int = 42,
+    num_clients: int = 10,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Execute ablation experiments A4 and A5 on real benchmark data."""
     logger = setup_logger(name="cov_metric_ablation")
@@ -87,8 +89,10 @@ def run_covariance_distance_ablations(
     )
 
     config = load_config("configs/default.yaml")
-    config.federated.num_clients = 10
+    config.federated.num_clients = num_clients
     config.federated.num_rounds = rounds
+    if "batch_size" in kwargs and kwargs["batch_size"] is not None:
+        config.federated.batch_size = kwargs["batch_size"]
     config.federated.partition.beta_dirichlet = beta_dirichlet
     config.data.known_classes = known_classes
     config.data.unknown_classes = unknown_classes
@@ -356,6 +360,10 @@ def run_covariance_distance_ablations(
 
     logger.info(f"Ablation studies A4 & A5 completed. Tables saved to {out_p}")
     return full_results
+
+
+# Backward compatibility and Colab runner alias
+run_covariance_aggregation_comparison = run_covariance_distance_ablations
 
 
 def generate_ablation_latex_table(results: Dict[str, Dict[str, float]], caption: str, label: str) -> str:

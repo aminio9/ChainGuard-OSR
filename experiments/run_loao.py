@@ -12,7 +12,9 @@ Aligned with LaTeX Section 6.5 (Table 6 & Figure 7):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 from pathlib import Path
 
 root_dir = Path(__file__).resolve().parent.parent
@@ -37,28 +39,57 @@ from src.metrics.osr_metrics import compute_osr_metrics
 from src.visualization.latex_tables import generate_latex_loao_table
 
 
+LOAO_ATTACKS = {
+    "BP": {"known": [0, 2, 3, 4], "unknown": [1]},
+    "DoS": {"known": [0, 1, 3, 4], "unknown": [2]},
+    "MitM": {"known": [0, 1, 2, 4], "unknown": [3]},
+    "FoT": {"known": [0, 1, 2, 3], "unknown": [4]},
+}
+
+
 def evaluate_loao_attack(
-    attack_name: str,
-    known_classes: list[int],
-    unknown_classes: list[int],
+    attack_name: Optional[str] = None,
+    known_classes: Optional[list[int]] = None,
+    unknown_classes: Optional[list[int]] = None,
     config_path: str = "configs/default.yaml",
     rounds: int = 15,
     beta_dirichlet: float = 0.5,
     max_samples: Optional[int] = None,
+    dataset_name: str = "b_nat",
+    held_out_attack: Optional[str] = None,
+    seed: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    **kwargs: Any,
 ) -> Dict[str, float]:
     """Execute complete 3-phase training and evaluation for a specific LOAO attack holdout."""
+    target_attack = held_out_attack if held_out_attack is not None else attack_name
+    if target_attack is None:
+        target_attack = "BP"
+
+    if known_classes is None or unknown_classes is None:
+        if target_attack in LOAO_ATTACKS:
+            known_classes = LOAO_ATTACKS[target_attack]["known"]
+            unknown_classes = LOAO_ATTACKS[target_attack]["unknown"]
+        else:
+            known_classes = [0, 2, 3, 4]
+            unknown_classes = [1]
+
     config = load_config(config_path)
     config.federated.num_rounds = rounds
+    if batch_size is not None:
+        config.federated.batch_size = batch_size
     config.federated.partition.beta_dirichlet = beta_dirichlet
     config.data.known_classes = known_classes
     config.data.unknown_classes = unknown_classes
+    if seed is not None:
+        config.experiment.seed = seed
 
     set_seed(config.experiment.seed)
     device = get_device(config.experiment.device)
 
-    # 1. Dataset loading: Load real B-NAT benchmark from data/raw
+    # 1. Dataset loading: Load real benchmark from data/raw
     raw_dataset, meta = load_benchmark_dataset(
-        dataset_name="b_nat",
+        dataset_name=dataset_name,
         data_dir="data/raw",
         samples_per_class=max_samples,
     )
@@ -70,6 +101,7 @@ def evaluate_loao_attack(
         test_ratio=config.data.test_split_ratio,
         cal_ratio=config.data.cal_split_ratio,
         seed=config.experiment.seed,
+        protocol=os.environ.get("OSR_PROTOCOL", "full"),
     )
     config.model.in_features = train_ds.features.shape[1]
 
@@ -91,8 +123,22 @@ def evaluate_loao_attack(
     server = FederatedServer(config, clients, device)
 
     # 3. Phase I: Collaborative Representation Learning
+    t_loao_start = time.perf_counter()
+    log_interval = max(1, rounds // 10) if rounds >= 20 else max(1, rounds // 5)
     for r in range(1, rounds + 1):
-        server.run_round(r)
+        t_r0 = time.perf_counter()
+        r_loss = server.run_round(r)
+        if r == 1 or r % log_interval == 0 or r == rounds:
+            elapsed = time.perf_counter() - t_loao_start
+            r_sec = time.perf_counter() - t_r0
+            avg_sec = elapsed / r
+            eta_sec = avg_sec * (rounds - r)
+            loss_val = r_loss.get("train_loss", r_loss.get("loss_bla", 0.0)) if isinstance(r_loss, dict) else 0.0
+            print(
+                f"    [LOAO-{target_attack}] Round {r:3d}/{rounds} | Loss: {loss_val:.4f} | "
+                f"Speed: {r_sec:.2f}s/rnd | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
+                flush=True,
+            )
 
     # Freeze encoder permanently (Algorithm 1 Line 7)
     server.freeze_global_encoder()

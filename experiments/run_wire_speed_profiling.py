@@ -345,8 +345,12 @@ def run_wire_speed_experiment(
     output_dir: str = "results/wire_speed",
     warmup: int = 1000,
     trials: int = 10000,
+    num_trials: Optional[int] = None,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Execute complete wire-speed complexity and latency profiling suite (E8)."""
+    if num_trials is not None:
+        trials = num_trials
     logger = setup_logger(name="wire_speed_runner")
     logger.info(f"Executing Wire-Speed Latency and Complexity Profiling (E8, warmup={warmup}, trials={trials})...")
 
