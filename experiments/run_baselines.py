@@ -409,6 +409,34 @@ def evaluate_method_configuration(
             y_pred=preds_closed,
             num_classes=num_known,
         )
+
+        server.global_model.eval()
+        with torch.no_grad():
+            logits_nn = server.global_model.classify(test_closed_ds.features.to(device))
+            preds_nn = torch.argmax(logits_nn, dim=-1).cpu().numpy()
+        metrics_nn = compute_classification_metrics(
+            y_true=y_closed_true,
+            y_pred=preds_nn,
+            num_classes=num_known,
+        )
+
+        closed_metrics["mahalanobis_accuracy"] = float(closed_metrics["accuracy"])
+        closed_metrics["mahalanobis_macro_f1"] = float(closed_metrics["macro_f1"])
+        closed_metrics["mahalanobis_class_wise_f1"] = closed_metrics.get("class_wise_f1", [])
+        closed_metrics["mahalanobis_confusion_matrix"] = closed_metrics.get("confusion_matrix", [])
+
+        closed_metrics["nn_head_accuracy"] = float(metrics_nn["accuracy"])
+        closed_metrics["nn_head_macro_f1"] = float(metrics_nn["macro_f1"])
+        closed_metrics["nn_head_class_wise_f1"] = metrics_nn.get("class_wise_f1", [])
+        closed_metrics["nn_head_confusion_matrix"] = metrics_nn.get("confusion_matrix", [])
+
+        print(
+            f"\n    [CLOSED-SET EVALUATION RESULTS]\n"
+            f"      * Neural Classifier Head (Softmax): Accuracy = {metrics_nn['accuracy'] * 100:.2f}% | Macro-F1 = {metrics_nn['macro_f1'] * 100:.2f}%\n"
+            f"      * Mahalanobis Edge Profile:        Accuracy = {closed_metrics['accuracy'] * 100:.2f}% | Macro-F1 = {closed_metrics['macro_f1'] * 100:.2f}%\n",
+            flush=True,
+        )
+
         closed_metrics["round_history"] = round_history
         closed_metrics["phase1_wall_time_sec"] = float(t_phase1)
         closed_metrics["phase2_wall_time_sec"] = float(t_phase2)
@@ -441,6 +469,15 @@ def evaluate_method_configuration(
     )
 
     y_closed_true = test_closed_ds.labels.numpy()
+    server.global_model.eval()
+    with torch.no_grad():
+        logits_nn = server.global_model.classify(test_closed_ds.features.to(device))
+        preds_nn = torch.argmax(logits_nn, dim=-1).cpu().numpy()
+    metrics_nn = compute_classification_metrics(
+        y_true=y_closed_true,
+        y_pred=preds_nn,
+        num_classes=num_known,
+    )
     closed_metrics = compute_classification_metrics(
         y_true=y_closed_true,
         y_pred=preds_closed,
@@ -456,6 +493,21 @@ def evaluate_method_configuration(
     metrics["closed_set_macro_f1"] = closed_metrics["macro_f1"]
     metrics["closed_set_class_wise_f1"] = closed_metrics.get("class_wise_f1", [])
     metrics["closed_set_confusion_matrix"] = closed_metrics.get("confusion_matrix", [])
+
+    metrics["nn_head_closed_accuracy"] = float(metrics_nn["accuracy"])
+    metrics["nn_head_closed_macro_f1"] = float(metrics_nn["macro_f1"])
+    metrics["mahalanobis_closed_accuracy"] = float(closed_metrics["accuracy"])
+    metrics["mahalanobis_closed_macro_f1"] = float(closed_metrics["macro_f1"])
+
+    print(
+        f"\n    [OPEN-SET EVALUATION RESULTS]\n"
+        f"      * Zero-Day AUROC:       {metrics.get('auroc', 0.0) * 100:.2f}%\n"
+        f"      * Zero-Day FPR@95:      {metrics.get('fpr95', 0.0) * 100:.2f}%\n"
+        f"      * Zero-Day Recall:      {metrics.get('unknown_recall', 0.0) * 100:.2f}%\n"
+        f"      * Known Test Acc (NN):  {metrics_nn['accuracy'] * 100:.2f}% (F1: {metrics_nn['macro_f1'] * 100:.2f}%)\n"
+        f"      * Known Test Acc (Maha):{closed_metrics['accuracy'] * 100:.2f}% (F1: {closed_metrics['macro_f1'] * 100:.2f}%\n",
+        flush=True,
+    )
 
     metrics["round_history"] = round_history
     metrics["phase1_wall_time_sec"] = float(t_phase1)

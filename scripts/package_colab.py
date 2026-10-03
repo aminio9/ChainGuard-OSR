@@ -296,9 +296,12 @@ for ds in datasets_e1:
         batch_size=BATCH_SIZE,
         samples_per_class=None,
     )
-    acc = metrics.get('closed_set_accuracy', metrics.get('accuracy', 0.0)) * 100
-    f1 = metrics.get('macro_f1', 0.0) * 100
-    print(f"[FedTROS-MC | {ds.upper()}] Accuracy: {acc:.2f}% | Macro-F1: {f1:.2f}%")
+    nn_acc = metrics.get('nn_head_accuracy', metrics.get('accuracy', 0.0)) * 100
+    nn_f1 = metrics.get('nn_head_macro_f1', metrics.get('macro_f1', 0.0)) * 100
+    maha_acc = metrics.get('mahalanobis_accuracy', metrics.get('closed_set_accuracy', metrics.get('accuracy', 0.0))) * 100
+    maha_f1 = metrics.get('mahalanobis_macro_f1', metrics.get('macro_f1', 0.0)) * 100
+    print(f"[FedTROS-MC | {ds.upper()}] NN Classifier Head -> Accuracy: {nn_acc:.2f}% | Macro-F1: {nn_f1:.2f}%")
+    print(f"[FedTROS-MC | {ds.upper()}] Mahalanobis Profile -> Accuracy: {maha_acc:.2f}% | Macro-F1: {maha_f1:.2f}%")
     (out_e1 / f'metrics_{ds}_fedtros_mc_proposed.json').write_text(json.dumps(metrics, indent=2))
 
 summary_e1_p = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e1.glob('metrics_*.json'))}
@@ -383,9 +386,11 @@ for alpha_d in skews_e2:
         batch_size=BATCH_SIZE,
         samples_per_class=None,
     )
-    acc = metrics.get('closed_set_accuracy', metrics.get('accuracy', 0.0)) * 100
-    f1 = metrics.get('macro_f1', 0.0) * 100
-    print(f'[alpha={alpha_d} | FedTROS-MC] Accuracy: {acc:.2f}% | Macro-F1: {f1:.2f}%')
+    nn_acc = metrics.get('nn_head_accuracy', metrics.get('accuracy', 0.0)) * 100
+    nn_f1 = metrics.get('nn_head_macro_f1', metrics.get('macro_f1', 0.0)) * 100
+    maha_acc = metrics.get('mahalanobis_accuracy', metrics.get('closed_set_accuracy', metrics.get('accuracy', 0.0))) * 100
+    maha_f1 = metrics.get('mahalanobis_macro_f1', metrics.get('macro_f1', 0.0)) * 100
+    print(f'[alpha={alpha_d} | FedTROS-MC] NN Head -> Acc: {nn_acc:.2f}%, F1: {nn_f1:.2f}% | Mahalanobis -> Acc: {maha_acc:.2f}%, F1: {maha_f1:.2f}%')
     (out_e2 / f'metrics_alpha{alpha_d}_fedtros_mc_proposed.json').write_text(json.dumps(metrics, indent=2))
 
 summary_e2_p = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e2.glob('metrics_*.json'))}
@@ -467,7 +472,7 @@ acc = metrics.get('closed_set_accuracy', metrics.get('accuracy', 0.0)) * 100
 auroc = metrics.get('auroc', 0.0) * 100
 fpr95 = metrics.get('fpr95', 0.0) * 100
 kfr = metrics.get('kfr', 0.0) * 100
-print(f'[FedTROS-MC] Closed Acc: {acc:.2f}% | AUROC: {auroc:.2f}% | FPR95: {fpr95:.2f}% | KFR: {kfr:.2f}%')
+print(f'[FedTROS-MC] AUROC: {auroc:.2f}% | FPR95: {fpr95:.2f}% | Recall: {metrics.get("unknown_recall", 0.0)*100:.2f}% | Closed Acc (NN/Maha): {metrics.get("nn_head_closed_accuracy", 0.0)*100:.2f}% / {metrics.get("mahalanobis_closed_accuracy", acc):.2f}%')
 (out_e3 / f'metrics_iid_fedtros_mc_proposed.json').write_text(json.dumps(metrics, indent=2))
 
 summary_e3_p = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e3.glob('metrics_*.json'))}
@@ -551,7 +556,7 @@ for alpha_d in skews_e4:
     auroc = metrics.get('auroc', 0.0) * 100
     fpr95 = metrics.get('fpr95', 0.0) * 100
     kfr = metrics.get('kfr', 0.0) * 100
-    print(f'[alpha={alpha_d} | FedTROS-MC] Closed Acc: {acc:.2f}% | AUROC: {auroc:.2f}% | FPR95: {fpr95:.2f}% | KFR: {kfr:.2f}%')
+    print(f'[alpha={alpha_d} | FedTROS-MC] AUROC: {auroc:.2f}% | FPR95: {fpr95:.2f}% | Recall: {metrics.get("unknown_recall", 0.0)*100:.2f}% | Closed Acc (NN/Maha): {metrics.get("nn_head_closed_accuracy", 0.0)*100:.2f}% / {metrics.get("mahalanobis_closed_accuracy", acc):.2f}%')
     (out_e4 / f'metrics_alpha{alpha_d}_fedtros_mc_proposed.json').write_text(json.dumps(metrics, indent=2))
 
 summary_e4_p = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e4.glob('metrics_*.json'))}
