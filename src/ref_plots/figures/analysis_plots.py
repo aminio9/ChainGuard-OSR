@@ -165,21 +165,23 @@ def convergence_summary(frame: pd.DataFrame, alpha: float) -> pd.DataFrame:
         group = group.sort_values("round")
         rounds = group["round"].to_numpy(float)
         performance = group[metric_column].to_numpy(float)
+        tail_perf = performance[-10:]
+        span_r = float(rounds[-1] - rounds[0])
         row: dict[str, float | str] = {
             "alpha": alpha,
             "method": str(method),
             "metric": metric_name,
             "final_metric_percent": float(performance[-1]),
             "best_metric_percent": float(performance.max()),
-            "last10_mean_percent": float(performance[-10:].mean()),
-            "last10_std_percent": float(performance[-10:].std(ddof=1)),
+            "last10_mean_percent": float(tail_perf.mean()),
+            "last10_std_percent": float(tail_perf.std(ddof=1)) if len(tail_perf) > 1 else 0.0,
             "learning_curve_auc_percent": float(
-                np.trapezoid(performance, rounds) / (rounds[-1] - rounds[0])
+                np.trapezoid(performance, rounds) / span_r if span_r > 0 else performance[-1]
             ),
         }
         for target in (90, 92, 94, 95):
             hits = np.flatnonzero(performance >= target)
-            row[f"round_to_{target}_percent"] = float(rounds[hits[0]]) if hits.size else np.nan
+            row[f"round_to_{target}_percent"] = float(rounds[hits[0]]) if hits.size else -1.0
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -198,8 +200,8 @@ def communication_summary(frame: pd.DataFrame) -> pd.DataFrame:
         }
         for target in (90, 92, 94, 95):
             hit = group[group["accuracy_percent"] >= target]
-            row[f"round_to_{target}_percent"] = float(hit.iloc[0]["round"]) if not hit.empty else np.nan
-            row[f"mb_to_{target}_percent"] = float(hit.iloc[0]["cumulative_mb"]) if not hit.empty else np.nan
+            row[f"round_to_{target}_percent"] = float(hit.iloc[0]["round"]) if not hit.empty else -1.0
+            row[f"mb_to_{target}_percent"] = float(hit.iloc[0]["cumulative_mb"]) if not hit.empty else -1.0
         rows.append(row)
     result = pd.DataFrame(rows)
     fedavg_total = float(result.loc[result["method"] == "FedAvg", "total_communication_mb"].iloc[0])

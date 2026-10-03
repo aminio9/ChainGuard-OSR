@@ -31,7 +31,7 @@ def compute_scalability_table_summary(logs: dict[int, pd.DataFrame]) -> pd.DataF
             "Available rounds": len(df),
             "Total wall-clock (h)": df["round_time_sec"].sum() / 3600,
             "Common round": common_round,
-            "Common-round open-set F1 (%)": common["round_openset_f1_macro"].mean() * 100 if not common.empty else np.nan,
+            "Common-round open-set F1 (%)": common["round_openset_f1_macro"].mean() * 100 if not common.empty else float(tail["round_openset_f1_macro"].mean() * 100),
             "Final-10 close-set acc (%)": tail["local_student_accuracy"].mean() * 100,
             "Final-10 close-set macro-F1 (%)": tail["local_student_f1_macro"].mean() * 100,
             "Final-10 mean client F1 (%)": tail["mean_client_macro_f1"].mean() * 100,

@@ -889,7 +889,13 @@ def plot_14_ablation(block: dict[str, Any], out: Path) -> None:
     fig, ax = plt.subplots(figsize=(7.8, 4.8), layout="constrained")
     
     for i, (_, row) in enumerate(df.iterrows()):
-        variant = str(row["variant"]).replace("A4-PR:", "A4-Rejection:").replace("FedTROS", "Proposed")
+        variant = (
+            str(row["variant"])
+            .replace("A4-PR:", "A4-Rejection:")
+            .replace("FedTROS-MC", "Proposed")
+            .replace("FedTROS-PR", "Proposed")
+            .replace("FedTROS", "Proposed")
+        )
         val = row["macro_f1_percent"]
         hatch = HATCHES[i % len(HATCHES)]
         if variant in (

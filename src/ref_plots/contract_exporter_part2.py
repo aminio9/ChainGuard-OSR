@@ -155,7 +155,7 @@ def export_real_plot_contract(
         known_classes=meta_bnat["known_classes"],
         unknown_classes=meta_bnat["unknown_classes"],
         seed=seed,
-        protocol="paper_table1" if spc is None else "full",
+        protocol="full",
     )
 
     # 1. Real Non-IID Client Distributions (Plot 02 & 02_2x2)
@@ -188,7 +188,7 @@ def export_real_plot_contract(
     pd.DataFrame(sweep_rows).to_csv(contract_dir / "client_distribution_iid_alpha_sweep.csv", index=False)
 
     # 2. Real Convergence, Communication, Robustness, and Forgetting across alpha in {0.1, 0.5, 1.0}
-    conv_a1, conv_a01, comm_a1, rob_rows, forget_rows = [], [], [], [], []
+    conv_a1, conv_a05, conv_a01, comm_a1, comm_a01, rob_rows, forget_rows = [], [], [], [], [], [], []
     main_osr_bundle = None
 
     for alpha_val in [1.0, 0.5, 0.1]:
@@ -209,20 +209,24 @@ def export_real_plot_contract(
             if alpha_val == 1.0:
                 conv_a1.extend(res["curve_rows"])
                 comm_a1.extend(res["comm_rows"])
+            elif alpha_val == 0.5:
+                conv_a05.extend(res["curve_rows"])
+                if m_name == "FedTROS-MC":
+                    main_osr_bundle = res
             elif alpha_val == 0.1:
                 conv_a01.extend(res["curve_rows"])
+                comm_a01.extend(res["comm_rows"])
                 forget_rows.append({
                     "method": m_name,
                     "present_accuracy": res["present_acc"],
                     "absent_accuracy": res["absent_acc"],
                 })
-            if alpha_val == 0.5 and m_name == "FedTROS-MC":
-                main_osr_bundle = res
 
     pd.DataFrame(conv_a1).to_csv(contract_dir / "convergence_alpha1.csv", index=False)
+    pd.DataFrame(conv_a05).to_csv(contract_dir / "convergence_alpha05.csv", index=False)
     pd.DataFrame(conv_a01).to_csv(contract_dir / "convergence_alpha01.csv", index=False)
     pd.DataFrame(comm_a1).to_csv(contract_dir / "communication_alpha1.csv", index=False)
-    pd.DataFrame(comm_a1).to_csv(contract_dir / "communication_alpha01_fedavg.csv", index=False)
+    pd.DataFrame(comm_a01).to_csv(contract_dir / "communication_alpha01_fedavg.csv", index=False)
     pd.DataFrame(forget_rows).to_csv(contract_dir / "client_forgetting_mitigation.csv", index=False)
     pd.DataFrame(main_osr_bundle["dyn_rows"]).to_csv(contract_dir / "training_dynamics.csv", index=False)
 

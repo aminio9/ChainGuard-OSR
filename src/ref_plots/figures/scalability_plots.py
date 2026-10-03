@@ -277,7 +277,7 @@ def write_scalability_summary(logs: dict[int, pd.DataFrame], out_tables: Path) -
             "common_round": common_round,
             "common_round_open_set_f1_pct": 100 * at_common["round_openset_f1_macro"],
             "final10_open_set_f1_mean_pct": 100 * tail["round_openset_f1_macro"].mean(),
-            "final10_open_set_f1_temporal_sd_pp": 100 * tail["round_openset_f1_macro"].std(ddof=1),
+            "final10_open_set_f1_temporal_sd_pp": 100 * (tail["round_openset_f1_macro"].std(ddof=1) if len(tail) > 1 else 0.0),
             "final10_auroc_mean_pct": 100 * tail["round_openset_auroc"].mean(),
             "final10_fpr95_mean_pct": 100 * tail["round_openset_fpr95"].mean(),
             "final10_unknown_recall_mean_pct": 100 * tail["round_openset_unknown_recall"].mean(),

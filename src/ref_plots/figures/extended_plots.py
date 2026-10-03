@@ -298,7 +298,13 @@ def plot_31_client_forgetting_mitigation(data_dir: Path, out: Path) -> None:
     if df.empty:
         raise ValueError("client_forgetting_mitigation.csv contains no rows.")
 
-    methods = [m.replace("FedTROS", "Proposed").replace("FedPROTEUS", "Proposed") for m in df["method"].tolist()]
+    methods = [
+        m.replace("FedTROS-MC", "Proposed")
+        .replace("FedTROS-PR", "Proposed")
+        .replace("FedTROS", "Proposed")
+        .replace("FedPROTEUS", "Proposed")
+        for m in df["method"].tolist()
+    ]
     fig, ax = plt.subplots(figsize=(8.0, 4.8), layout="constrained")
     x = np.arange(len(methods))
     width = 0.35

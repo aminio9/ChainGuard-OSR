@@ -20,6 +20,7 @@ from typing import Any, Dict
 PROJECT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from experiments.replot_all import replot_all_figures
 from src.ref_plots.config import ALL_FIGURE_STEMS
 from src.ref_plots.contract_exporter_part3 import finalize_real_plot_contract
 from src.ref_plots.figures.analysis_plots import generate_analysis_plots
@@ -27,28 +28,29 @@ from src.ref_plots.figures.base_plots import generate_base_plots
 from src.ref_plots.figures.extended_plots import generate_extended_plots
 from src.ref_plots.figures.scalability_plots import generate_scalability_plots
 from src.ref_plots.figures.tradeoff_plots import generate_tradeoff_plots
+from src.ref_plots.style import COLORS, apply_academic_spines, configure_academic_style, save_figure
 from src.ref_plots.tables.latex_tables import generate_all_latex_tables
 
 
 STEM_PROVENANCE_MAP: Dict[str, Dict[str, Any]] = {
     "01_scalability_clients": {"experiment": "E7_scalability", "contract_file": "result.json#plot_01_scalability"},
-    "02_non_iid_client_distribution": {"experiment": "E1_dirichlet_01", "contract_file": "client_distribution_alpha01.csv"},
-    "02_non_iid_partition_2x2_comparison": {"experiment": "E1_iid..E1_dirichlet_01", "contract_file": "client_distribution_iid_alpha_sweep.csv"},
+    "02_internal_non_iid_distribution": {"experiment": "E1_dirichlet_01", "contract_file": "client_distribution_alpha01.csv"},
+    "02_internal_non_iid_distribution_2x2": {"experiment": "E1_iid..E1_dirichlet_01", "contract_file": "client_distribution_iid_alpha_sweep.csv"},
     "03_convergence_mild_non_iid": {"experiment": "E1_iid / E2_baselines (alpha=1.0)", "contract_file": "convergence_alpha1.csv"},
     "04_convergence_hard_non_iid": {"experiment": "E1_dirichlet_01 / E2_baselines (alpha=0.1)", "contract_file": "convergence_alpha01.csv"},
     "05_mahalanobis_nonconformity_distribution": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_scores.csv"},
     "06_openness_vs_auroc": {"experiment": "E2_E3_benchmarks (4 datasets)", "contract_file": "result.json#plot_06_openness"},
-    "07_roc_curve_unknown_detection": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_roc_curve.csv"},
-    "08_precision_recall_unknown_detection": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_pr_curve.csv"},
-    "09_confusion_matrix_before_rejection": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_confusion_before.csv"},
-    "10_confusion_matrix_after_rejection": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_confusion_after.csv"},
-    "09_10_confusion_matrix_comparison": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_confusion_before/after.csv"},
-    "09_10_confusion_matrix_comparison_percent": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_confusion_before/after.csv"},
-    "11_non_iid_robustness_across_alpha": {"experiment": "E1_iid..E1_dirichlet_01", "contract_file": "result.json#plot_11_robustness"},
-    "12_latent_space_geometry": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_latent_projection.csv"},
-    "13_accuracy_vs_communication": {"experiment": "E2_baselines / E5_comm", "contract_file": "communication_alpha1.csv"},
+    "07_roc_unknown_detection": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_roc_curve.csv"},
+    "08_pr_unknown_detection": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_pr_curve.csv"},
+    "09_confusion_before_open_set": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_confusion_before.csv"},
+    "10_confusion_after_open_set": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_confusion_after.csv"},
+    "09_10_confusion_comparison": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_confusion_before/after.csv"},
+    "09_10_confusion_comparison_percentage": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_confusion_before/after.csv"},
+    "11_non_iid_robustness_boxplot": {"experiment": "E1_iid..E1_dirichlet_01", "contract_file": "result.json#plot_11_robustness"},
+    "12_adaptive_multicenter_geometry": {"experiment": "E2_E3_benchmarks (B-NAT)", "contract_file": "exp2_latent_projection.csv"},
+    "13_communication_efficiency": {"experiment": "E2_baselines / E5_comm", "contract_file": "communication_alpha1.csv"},
     "14_ablation_study": {"experiment": "A1_component_ablations + A5_blocks", "contract_file": "result.json#plot_14_ablation"},
-    "15_method_comparison_mild_non_iid": {"experiment": "E2_baselines (alpha=1.0)", "contract_file": "result.json#plot_15_method_comparison"},
+    "15_method_comparison": {"experiment": "E2_baselines (alpha=1.0)", "contract_file": "result.json#plot_15_method_comparison"},
     "16_scalability_convergence_common_rounds": {"experiment": "E7_scalability (K=10,50,100)", "contract_file": "scalability_{10,50,100}_clients.csv"},
     "17_scalability_quality_vs_wallclock": {"experiment": "E7_scalability (K=10,50,100)", "contract_file": "scalability_{10,50,100}_clients.csv"},
     "18_scalability_runtime_breakdown": {"experiment": "E7_scalability (K=10,50,100)", "contract_file": "scalability_{10,50,100}_clients.csv"},
@@ -68,9 +70,105 @@ STEM_PROVENANCE_MAP: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _plot_and_tabulate_all_baselines(results_root: Path, figures_dir: Path, tables_dir: Path) -> None:
+    """Export comprehensive plot and table of all 13 baselines + FedTROS-MC from E2_baselines."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
+
+    e2_summary_path = results_root / "E2_baselines" / "b_nat" / "summary.json"
+    if not e2_summary_path.exists():
+        return
+
+    payload = json.loads(e2_summary_path.read_text(encoding="utf-8"))
+    summary = payload.get("summary", {})
+    if not summary:
+        return
+
+    rows = []
+    for method_name, metrics in summary.items():
+        display_name = "Proposed (FedTROS-MC)" if "FedTROS-MC" in method_name else method_name
+        rows.append({
+            "method": display_name,
+            "auroc_pct": float(metrics["auroc"]["mean"] * 100.0),
+            "aupr_pct": float(metrics["aupr"]["mean"] * 100.0),
+            "fpr95_pct": float(metrics.get("fpr95", {"mean": 0.0})["mean"] * 100.0),
+            "unknown_f1_pct": float(metrics["unknown_f1"]["mean"] * 100.0),
+            "open_set_macro_f1_pct": float(metrics["open_set_macro_f1"]["mean"] * 100.0),
+            "closed_accuracy_pct": float(metrics["accuracy"]["mean"] * 100.0),
+            "kfr_pct": float(metrics["kfr"]["mean"] * 100.0),
+        })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(tables_dir / "all_baselines_summary.csv", index=False)
+
+    # Generate LaTeX table for all 13 baselines + Proposed
+    tex_lines = [
+        r"\begin{table*}[t]",
+        r"\centering",
+        r"\caption{Comprehensive comparison across all 13 federated and open-set baselines versus the proposed framework under Non-IID Dirichlet skew ($\alpha_D = 0.5$).}",
+        r"\label{tab:all_13_baselines}",
+        r"\resizebox{\textwidth}{!}{%",
+        r"\begin{tabular}{lccccccc}",
+        r"\toprule",
+        r"Method & Closed Acc. (\%) $\uparrow$ & AUROC (\%) $\uparrow$ & AUPR (\%) $\uparrow$ & FPR@95 (\%) $\downarrow$ & Unknown-F1 (\%) $\uparrow$ & Open-Set Macro-F1 (\%) $\uparrow$ & KFR (\%) $\downarrow$ \\",
+        r"\midrule",
+    ]
+    for _, r in df.iterrows():
+        m_str = f"\\textbf{{{r['method']}}}" if "Proposed" in str(r["method"]) else str(r["method"])
+        tex_lines.append(
+            f"{m_str} & {r['closed_accuracy_pct']:.2f} & {r['auroc_pct']:.2f} & {r['aupr_pct']:.2f} & "
+            f"{r['fpr95_pct']:.2f} & {r['unknown_f1_pct']:.2f} & {r['open_set_macro_f1_pct']:.2f} & {r['kfr_pct']:.2f} \\\\"
+        )
+    tex_lines.extend([r"\bottomrule", r"\end{tabular}%", r"}", r"\end{table*}"])
+    (tables_dir / "table_all_baselines.tex").write_text("\n".join(tex_lines), encoding="utf-8")
+
+    # Generate Figure 32: All 13 Baselines + Proposed Comparison
+    configure_academic_style()
+    df_plot = df.sort_values("open_set_macro_f1_pct", ascending=True).reset_index(drop=True)
+    fig, ax = plt.subplots(figsize=(9.2, 6.2), layout="constrained")
+    y = np.arange(len(df_plot))
+    height = 0.38
+
+    b1 = ax.barh(
+        y - height / 2,
+        df_plot["open_set_macro_f1_pct"],
+        height=height,
+        label="Open-Set Macro-F1 (%)",
+        color=COLORS["Proposed"],
+        edgecolor="#000000",
+        linewidth=0.8,
+        hatch="///",
+    )
+    b2 = ax.barh(
+        y + height / 2,
+        df_plot["auroc_pct"],
+        height=height,
+        label="Unknown Detection AUROC (%)",
+        color=COLORS["FedAvg"],
+        edgecolor="#000000",
+        linewidth=0.8,
+        hatch="\\\\\\",
+    )
+    for bar in b1:
+        w = bar.get_width()
+        ax.text(w + 0.6, bar.get_y() + bar.get_height() / 2, f"{w:.1f}%", va="center", fontsize=7.8, weight="bold")
+    for bar in b2:
+        w = bar.get_width()
+        ax.text(w + 0.6, bar.get_y() + bar.get_height() / 2, f"{w:.1f}%", va="center", fontsize=7.8)
+
+    ax.set_yticks(y, df_plot["method"], fontsize=9.2)
+    ax.set_xlabel("Performance (%)")
+    ax.set_xlim(0, 112)
+    ax.set_title("Comprehensive Benchmark Across All 13 Baselines and Proposed Method (E2)", fontsize=11.8, weight="bold")
+    ax.legend(loc="lower right", framealpha=0.95)
+    apply_academic_spines(ax)
+    save_figure(fig, figures_dir, "32_all_baselines_comparison")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate all 31 FedTROS-MC figures (34 stems) in the exact reference style from real experiment outputs."
+        description="Generate all FedTROS-MC publication figures and LaTeX tables from real experiment outputs."
     )
     parser.add_argument("--results_root", type=str, default="results/runs_v2")
     parser.add_argument("--figures_dir", type=str, default="results/runs_v2/figures")
@@ -97,22 +195,26 @@ def main() -> None:
         )
 
     results_json = contract_dir / "result.json"
-    print("[1/6] Generating Base Figures (01-15 + 02_2x2 + 09_10 comparisons) ...")
+    print("[1/7] Generating Base Figures (01-15 + 02_2x2 + 09_10 comparisons) ...")
     generate_base_plots(results_json_path=results_json, output_dir=figures_dir, data_dir=contract_dir)
 
-    print("[2/6] Generating Scalability Figures (16-20) ...")
+    print("[2/7] Generating Scalability Figures (16-20) ...")
     generate_scalability_plots(data_dir=contract_dir, figures_out=figures_dir, tables_out=tables_dir)
 
-    print("[3/6] Generating Trade-off & Pareto Figures (21-22) ...")
+    print("[3/7] Generating Trade-off & Pareto Figures (21-22) ...")
     generate_tradeoff_plots(data_dir=contract_dir, figures_out=figures_dir, tables_out=tables_dir)
 
-    print("[4/6] Generating Non-Scalability Analysis Figures (23-26) ...")
+    print("[4/7] Generating Non-Scalability Analysis Figures (23-26) ...")
     generate_analysis_plots(data_dir=contract_dir, figures_out=figures_dir, tables_out=tables_dir)
 
-    print("[5/6] Generating Extended Q1 Figures (27-31) ...")
+    print("[5/7] Generating Extended Q1 Figures (27-31) ...")
     generate_extended_plots(data_dir=contract_dir, figures_out=figures_dir, tables_out=tables_dir)
 
-    print("[6/6] Generating LaTeX Summary Tables ...")
+    print("[6/7] Generating All-13-Baselines Comparison (32) and Deep Q1 Figures ...")
+    _plot_and_tabulate_all_baselines(results_root=results_root, figures_dir=figures_dir, tables_dir=tables_dir)
+    replot_all_figures(results_dir=results_root, figures_dir=figures_dir)
+
+    print("[7/7] Generating LaTeX Summary Tables ...")
     generate_all_latex_tables(tables_out=tables_dir, docs_out=tables_dir, data_dir=contract_dir)
 
     manifest: Dict[str, Any] = {}
@@ -130,12 +232,20 @@ def main() -> None:
             "pdf": str(pdf_p),
         }
 
+    if (figures_dir / "32_all_baselines_comparison.png").exists():
+        manifest["32_all_baselines_comparison"] = {
+            "source_experiment": "E2_baselines (all 13 baselines + Proposed)",
+            "contract_source": str(results_root / "E2_baselines" / "b_nat" / "summary.json"),
+            "png": str(figures_dir / "32_all_baselines_comparison.png"),
+            "pdf": str(figures_dir / "32_all_baselines_comparison.pdf"),
+        }
+
     if missing:
         raise RuntimeError(f"Missing expected figure outputs: {missing}")
 
     manifest_path = figures_dir / "figure_provenance_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-    print(f"[SUCCESS] All {len(ALL_FIGURE_STEMS)} figure stems (PNG + PDF) generated in {figures_dir}")
+    print(f"[SUCCESS] All {len(ALL_FIGURE_STEMS)} reference figure stems + extended baseline/ablation figures generated in {figures_dir}")
     print(f"[MANIFEST] {manifest_path}")
 
 
