@@ -1023,8 +1023,12 @@ print(f"CUDA Available:  {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"Active GPU:      {torch.cuda.get_device_name(0)}")
     print(f"VRAM Total:      {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    print("  -> [OK] GPU Acceleration Active! Expected speed: ~2-4 seconds per communication round.")
 else:
-    print("Running in CPU mode.")
+    print("  -> [WARNING] Running in CPU mode (~90-110s per round).")
+    if IS_COLAB:
+        print("     [ACTION REQUIRED] In Google Colab, enable GPU now:")
+        print("     Click: Runtime -> Change runtime type -> Select 'T4 GPU' -> Save!")
 
 if IS_COLAB:
     from IPython.display import HTML, display
@@ -1224,6 +1228,12 @@ print(f"CUDA Available:  {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"Active GPU:      {torch.cuda.get_device_name(0)}")
     print(f"VRAM Total:      {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+    print("  -> [OK] GPU Acceleration Active! Expected speed: ~2-4 seconds per communication round.")
+else:
+    print("  -> [WARNING] Running in CPU mode (~90-110s per round).")
+    if IS_COLAB:
+        print("     [ACTION REQUIRED] In Google Colab, enable GPU now:")
+        print("     Click: Runtime -> Change runtime type -> Select 'T4 GPU' -> Save!")
 
 if IS_COLAB:
     from IPython.display import HTML, display
