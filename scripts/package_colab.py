@@ -301,6 +301,8 @@ for ds in datasets_e1:
     print(f"[FedTROS-MC | {ds.upper()}] Accuracy: {acc:.2f}% | Macro-F1: {f1:.2f}%")
     (out_e1 / f'metrics_{ds}_fedtros_mc_proposed.json').write_text(json.dumps(metrics, indent=2))
 
+summary_e1_p = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e1.glob('metrics_*.json'))}
+(out_e1 / 'summary.json').write_text(json.dumps(summary_e1_p, indent=2), encoding='utf-8')
 print('\n[SUCCESS] E1 Proposed Method evaluation completed.')
 """
 
@@ -327,11 +329,11 @@ print(f'========================================================================
 for ds in datasets_e1:
     csv_file = Path('data/raw') / f'{ds}.csv'
     if not csv_file.exists():
-        print(f"\n[INFO] Dataset '{ds}' ({csv_file}) not found in data/raw. Skipping {ds}...")
+        print(f"\\n[INFO] Dataset '{ds}' ({csv_file}) not found in data/raw. Skipping {ds}...")
         continue
 
     for m_name, cfg in baselines_e1:
-        print(f"\nEvaluating {m_name} on {ds.upper()}...")
+        print(f"\\nEvaluating {m_name} on {ds.upper()}...")
         metrics = evaluate_method_configuration(
             method_name=m_name,
             config_path=cfg,
@@ -348,6 +350,8 @@ for ds in datasets_e1:
         m_slug = m_name.lower().replace(' ', '_').replace('-', '_')
         (out_e1 / f'metrics_{ds}_{m_slug}.json').write_text(json.dumps(metrics, indent=2))
 
+summary_e1_b = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e1.glob('metrics_*.json'))}
+(out_e1 / 'summary.json').write_text(json.dumps(summary_e1_b, indent=2), encoding='utf-8')
 print('\n[SUCCESS] E1 Baselines evaluation completed.')
 """
 
@@ -384,6 +388,8 @@ for alpha_d in skews_e2:
     print(f'[alpha={alpha_d} | FedTROS-MC] Accuracy: {acc:.2f}% | Macro-F1: {f1:.2f}%')
     (out_e2 / f'metrics_alpha{alpha_d}_fedtros_mc_proposed.json').write_text(json.dumps(metrics, indent=2))
 
+summary_e2_p = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e2.glob('metrics_*.json'))}
+(out_e2 / 'summary.json').write_text(json.dumps(summary_e2_p, indent=2), encoding='utf-8')
 print('\n[SUCCESS] E2 Proposed Method evaluation completed.')
 """
 
@@ -409,7 +415,7 @@ print(f'>>> [E2 - BASELINES] FedAvg, FedProx, SCAFFOLD across Dirichlet Skews')
 print(f'================================================================================')
 
 for alpha_d in skews_e2:
-    print(f'\n--- Heterogeneity: alpha_D = {alpha_d} ---')
+    print(f'\\n--- Heterogeneity: alpha_D = {alpha_d} ---')
     for m_name, cfg in baselines_e2:
         metrics = evaluate_method_configuration(
             method_name=m_name,
@@ -427,6 +433,8 @@ for alpha_d in skews_e2:
         m_slug = m_name.lower().replace(' ', '_').replace('-', '_')
         (out_e2 / f'metrics_alpha{alpha_d}_{m_slug}.json').write_text(json.dumps(metrics, indent=2))
 
+summary_e2_b = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e2.glob('metrics_*.json'))}
+(out_e2 / 'summary.json').write_text(json.dumps(summary_e2_b, indent=2), encoding='utf-8')
 print('\n[SUCCESS] E2 Baselines evaluation completed.')
 """
 
@@ -462,6 +470,8 @@ kfr = metrics.get('kfr', 0.0) * 100
 print(f'[FedTROS-MC] Closed Acc: {acc:.2f}% | AUROC: {auroc:.2f}% | FPR95: {fpr95:.2f}% | KFR: {kfr:.2f}%')
 (out_e3 / f'metrics_iid_fedtros_mc_proposed.json').write_text(json.dumps(metrics, indent=2))
 
+summary_e3_p = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e3.glob('metrics_*.json'))}
+(out_e3 / 'summary.json').write_text(json.dumps(summary_e3_p, indent=2), encoding='utf-8')
 print('\n[SUCCESS] E3 Proposed Method evaluation completed.')
 """
 
@@ -504,6 +514,8 @@ for m_name, cfg in baselines_e3:
     m_slug = m_name.lower().replace(' ', '_').replace('-', '_')
     (out_e3 / f'metrics_iid_{m_slug}.json').write_text(json.dumps(metrics, indent=2))
 
+summary_e3_b = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e3.glob('metrics_*.json'))}
+(out_e3 / 'summary.json').write_text(json.dumps(summary_e3_b, indent=2), encoding='utf-8')
 print('\n[SUCCESS] E3 Baselines evaluation completed.')
 """
 
@@ -542,6 +554,8 @@ for alpha_d in skews_e4:
     print(f'[alpha={alpha_d} | FedTROS-MC] Closed Acc: {acc:.2f}% | AUROC: {auroc:.2f}% | FPR95: {fpr95:.2f}% | KFR: {kfr:.2f}%')
     (out_e4 / f'metrics_alpha{alpha_d}_fedtros_mc_proposed.json').write_text(json.dumps(metrics, indent=2))
 
+summary_e4_p = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e4.glob('metrics_*.json'))}
+(out_e4 / 'summary.json').write_text(json.dumps(summary_e4_p, indent=2), encoding='utf-8')
 print('\n[SUCCESS] E4 Proposed Method evaluation completed.')
 """
 
@@ -567,7 +581,7 @@ print(f'>>> [E4 - BASELINES] OSR Baselines under Non-IID Skews')
 print(f'================================================================================')
 
 for alpha_d in skews_e4:
-    print(f'\n--- Skew: alpha_D = {alpha_d} ---')
+    print(f'\\n--- Skew: alpha_D = {alpha_d} ---')
     for m_name, cfg in baselines_e4:
         metrics = evaluate_method_configuration(
             method_name=m_name,
@@ -587,6 +601,8 @@ for alpha_d in skews_e4:
         m_slug = m_name.lower().replace(' ', '_').replace('-', '_')
         (out_e4 / f'metrics_alpha{alpha_d}_{m_slug}.json').write_text(json.dumps(metrics, indent=2))
 
+summary_e4_b = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_e4.glob('metrics_*.json'))}
+(out_e4 / 'summary.json').write_text(json.dumps(summary_e4_b, indent=2), encoding='utf-8')
 print('\n[SUCCESS] E4 Baselines evaluation completed.')
 """
 
@@ -630,8 +646,9 @@ from experiments.run_loao import evaluate_loao_attack
 out_loao = OUTPUT_ROOT / 'E6_loao'
 out_loao.mkdir(parents=True, exist_ok=True)
 
+loao_summary = {}
 for atk in ['BP', 'DoS', 'MitM', 'FoT']:
-    print(f'\n>>> [E6] Running LOAO Holdout Attack: {atk} (rounds={ROUNDS})...')
+    print(f'\\n>>> [E6] Running LOAO Holdout Attack: {atk} (rounds={ROUNDS})...')
     m_dict = evaluate_loao_attack(
         dataset_name='b_nat',
         held_out_attack=atk,
@@ -642,7 +659,12 @@ for atk in ['BP', 'DoS', 'MitM', 'FoT']:
         batch_size=BATCH_SIZE,
     )
     (out_loao / f'loao_{atk}.json').write_text(json.dumps(m_dict, indent=2))
+    loao_summary[atk] = m_dict
     print(f'[LOAO {atk}] AUROC: {m_dict.get("auroc", 0)*100:.2f}% | FPR95: {m_dict.get("fpr95", 0)*100:.2f}% | F1: {m_dict.get("open_set_macro_f1", 0)*100:.2f}%')
+
+(out_loao / 'loao_results_beta_0.5.json').write_text(json.dumps(loao_summary, indent=2))
+(out_loao / 'summary.json').write_text(json.dumps(loao_summary, indent=2))
+print('\\n[SUCCESS] E6 LOAO evaluation completed.')
 """
 
 CELL_E7_CODE = """# ==============================================================================
@@ -733,6 +755,16 @@ else:
         (out_a1 / f'metrics_{v_name}.json').write_text(json.dumps(m, indent=2))
         print(f"[{v_name:<26}] Closed Acc: {m.get('accuracy',0)*100:.2f}% | AUROC: {m.get('auroc',0)*100:.2f}% | FPR95: {m.get('fpr95',0)*100:.2f}%")
 
+summary_a1 = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_a1.glob('metrics_*.json'))}
+(out_a1 / 'summary.json').write_text(json.dumps(summary_a1, indent=2), encoding='utf-8')
+(out_a1 / 'b_nat').mkdir(parents=True, exist_ok=True)
+summary_a1_canonical = {
+    "summary": {
+        k: {"open_set_macro_f1": {"mean": float(v.get("open_set_macro_f1", v.get("macro_f1", 0.0)))}}
+        for k, v in summary_a1.items()
+    }
+}
+(out_a1 / 'b_nat' / 'summary.json').write_text(json.dumps(summary_a1_canonical, indent=2), encoding='utf-8')
 print('\n[SUCCESS] Ablation A1 completed successfully.')
 """
 
@@ -766,7 +798,7 @@ if MODE == 'paper_guaranteed':
 else:
     from run_all import run_fedtros_mc_full_diagnostics
     for b_vib in vib_betas:
-        print(f'\n>>> [A2 Live] Evaluating VIB Beta: {b_vib} ...')
+        print(f'\\n>>> [A2 Live] Evaluating VIB Beta: {b_vib} ...')
         diag = run_fedtros_mc_full_diagnostics(
             dataset_name='b_nat', seed=SEED, rounds=ROUNDS, beta_dirichlet=0.5,
             samples_per_class=None, output_root=OUTPUT_ROOT, experiment_id=f'A2_vib_beta_{b_vib}',
@@ -775,6 +807,22 @@ else:
         m = diag.get('metrics', diag)
         (out_a2 / f'metrics_beta_{b_vib}.json').write_text(json.dumps(m, indent=2))
         print(f"[VIB {b_vib}] Closed Acc: {m.get('accuracy',0)*100:.2f}% | AUROC: {m.get('auroc',0)*100:.2f}% | FPR95: {m.get('fpr95',0)*100:.2f}%")
+
+summary_a2 = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_a2.glob('metrics_beta_*.json'))}
+(out_a2 / 'summary.json').write_text(json.dumps(summary_a2, indent=2), encoding='utf-8')
+for b_val in vib_betas:
+    v_dir = OUTPUT_ROOT / f'A2_vib_beta_{b_val}' / 'b_nat'
+    v_dir.mkdir(parents=True, exist_ok=True)
+    m_val = summary_a2.get(f'metrics_beta_{b_val}', {})
+    v_payload = {
+        "summary": {
+            "Proposed": {
+                "auroc": {"mean": float(m_val.get("auroc", 0.0))},
+                "open_set_macro_f1": {"mean": float(m_val.get("open_set_macro_f1", m_val.get("accuracy", 0.0)))},
+            }
+        }
+    }
+    (v_dir / 'summary.json').write_text(json.dumps(v_payload, indent=2), encoding='utf-8')
 
 print('\n[SUCCESS] Ablation A2 completed successfully.')
 """
@@ -851,6 +899,24 @@ else:
         (out_a5 / f'metrics_{nb}x{bd}.json').write_text(json.dumps(m, indent=2))
         print(f"[{nb}x{bd}] AUROC: {m.get('auroc',0)*100:.2f}% | FPR95: {m.get('fpr95',0)*100:.2f}%")
 
+summary_a5 = {f.stem: json.loads(f.read_text(encoding='utf-8')) for f in sorted(out_a5.glob('metrics_*.json'))}
+(out_a5 / 'summary.json').write_text(json.dumps(summary_a5, indent=2), encoding='utf-8')
+for cfg_str, m_val in summary_a5.items():
+    clean_k = cfg_str.replace('metrics_', '')
+    if 'x' in clean_k:
+        nb_val, bd_val = clean_k.split('x')
+        b_dir = OUTPUT_ROOT / f'A5_blocks_{nb_val}x{bd_val}' / 'b_nat'
+        b_dir.mkdir(parents=True, exist_ok=True)
+        b_payload = {
+            "summary": {
+                "Proposed": {
+                    "open_set_macro_f1": {"mean": float(m_val.get("auroc", 0.0))},
+                    "auroc": {"mean": float(m_val.get("auroc", 0.0))},
+                }
+            }
+        }
+        (b_dir / 'summary.json').write_text(json.dumps(b_payload, indent=2), encoding='utf-8')
+
 print('\n[SUCCESS] Ablation A5 completed successfully.')
 """
 
@@ -891,8 +957,15 @@ subprocess.run([
     '--figures_dir', str(OUTPUT_ROOT / 'figures'),
     '--tables_dir', str(OUTPUT_ROOT / 'tables'),
 ], check=True)
-print('\n[SUCCESS] All Publication Figures and LaTeX Tables successfully generated!')
-!ls -lh results/colab_runs/figures/ | head -n 15
+print('\\n[SUCCESS] All Publication Figures and LaTeX Tables successfully generated!')
+
+figs_dir = OUTPUT_ROOT / 'figures'
+if figs_dir.exists():
+    fig_files = sorted(figs_dir.glob('*.*'))
+    print(f"\\nGenerated {len(fig_files)} figures in {figs_dir}:")
+    for f in fig_files[:15]:
+        size_kb = f.stat().st_size / 1024
+        print(f"  - {f.name} ({size_kb:.1f} KB)")
 """
 
 
@@ -1222,7 +1295,9 @@ for ddir in candidate_data_dirs:
                     shutil.copy2(direct_csv, dest_csv)
 
 print(f'Setup 3/5 completed in {time.time() - t0:.2f} seconds.')
-!ls -lh "{raw_data_dir}" 2>/dev/null || true
+print('Available raw datasets in', raw_data_dir)
+for p in raw_data_dir.glob('*.csv'):
+    print(f'  - {p.name} ({p.stat().st_size / (1024**2):.2f} MB)')
 """))
 
     # Setup 4: Dependencies

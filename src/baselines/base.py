@@ -21,7 +21,12 @@ from torch.utils.data import DataLoader
 
 from src.data.base import FlowDataset
 from src.metrics.classification import compute_classification_metrics
-from src.metrics.osr_metrics import compute_osr_metrics
+from src.metrics.osr_metrics import (
+    compute_confusion_matrix,
+    compute_osr_metrics,
+    compute_pr_curve_points,
+    compute_roc_curve_points,
+)
 from src.osr.conformal import compute_finite_sample_quantile
 
 
@@ -365,7 +370,7 @@ class BaseBaseline(ABC):
 
         # Step 2: Open-set evaluation
         x_open = test_open_ds.features.to(self.device)
-        preds_open, anomaly_scores_open, _ = self.predict_batch_unified(
+        preds_open, anomaly_scores_open, cand_classes_open = self.predict_batch_unified(
             x_open,
             scoring_method=eff_scoring,
             use_mondrian=use_mondrian,
@@ -402,6 +407,27 @@ class BaseBaseline(ABC):
         except Exception:
             svd_stats = {"stable_rank": 1.0, "singular_values_norm": [1.0]}
 
+        # Step 5: Rich diagnostic artifacts (Confusion Matrices & Sampled Curves)
+        cm_closed = closed_metrics.get("confusion_matrix", [])
+        cm_before = compute_confusion_matrix(y_open_true, cand_classes_open, labels=list(range(self.num_classes + 1)))
+        cm_after = compute_confusion_matrix(y_open_true, preds_open, labels=list(range(self.num_classes + 1)))
+
+        fpr_pts, tpr_pts = compute_roc_curve_points(
+            (y_open_true == self.num_classes).astype(int), anomaly_scores_open
+        )
+        prec_pts, rec_pts = compute_pr_curve_points(
+            (y_open_true == self.num_classes).astype(int), anomaly_scores_open
+        )
+
+        def _sample_curve(x_arr: np.ndarray, y_arr: np.ndarray, num_pts: int = 50) -> Tuple[List[float], List[float]]:
+            if len(x_arr) <= num_pts:
+                return [round(float(v), 5) for v in x_arr], [round(float(v), 5) for v in y_arr]
+            idx = np.linspace(0, len(x_arr) - 1, num_pts, dtype=int)
+            return [round(float(x_arr[i]), 5) for i in idx], [round(float(y_arr[i]), 5) for i in idx]
+
+        roc_fpr, roc_tpr = _sample_curve(fpr_pts, tpr_pts)
+        pr_prec, pr_rec = _sample_curve(prec_pts, rec_pts)
+
         results = {
             "baseline_name": self.name,
             "scoring_method": eff_scoring,
@@ -413,6 +439,11 @@ class BaseBaseline(ABC):
             "accuracy": float(closed_metrics["accuracy"]),
             "balanced_accuracy": float(closed_metrics["balanced_accuracy"]),
             "closed_set_macro_f1": float(closed_metrics["macro_f1"]),
+            "closed_set_class_wise_f1": closed_metrics.get("class_wise_f1", []),
+            "closed_set_confusion_matrix": cm_closed,
+            "confusion_matrix": cm_closed,
+            "confusion_matrix_before": cm_before.tolist(),
+            "confusion_matrix_after": cm_after.tolist(),
             "auroc": float(osr_metrics["auroc"]),
             "aupr": float(osr_metrics["aupr"]),
             "fpr95": float(osr_metrics["fpr95"]),
@@ -421,6 +452,10 @@ class BaseBaseline(ABC):
             "unknown_f1": float(osr_metrics["unknown_f1"]),
             "open_set_macro_f1": float(osr_metrics["open_set_macro_f1"]),
             "kfr": float(osr_metrics["kfr"]),
+            "per_class_kfr": osr_metrics.get("per_class_kfr", {}),
+            "per_class_coverage": osr_metrics.get("per_class_coverage", {}),
+            "roc_curve": {"fpr": roc_fpr, "tpr": roc_tpr},
+            "pr_curve": {"precision": pr_prec, "recall": pr_rec},
             "stable_rank": float(svd_stats["stable_rank"]),
             "singular_values_norm": svd_stats["singular_values_norm"],
         }

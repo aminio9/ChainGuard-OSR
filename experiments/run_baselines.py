@@ -42,7 +42,12 @@ from src.data.base import FlowDataset
 from src.federated.client import FederatedClient
 from src.federated.server import FederatedServer
 from src.metrics.classification import compute_classification_metrics
-from src.metrics.osr_metrics import compute_osr_metrics
+from src.metrics.osr_metrics import (
+    compute_confusion_matrix,
+    compute_osr_metrics,
+    compute_pr_curve_points,
+    compute_roc_curve_points,
+)
 from src.visualization.latex_tables import (
     generate_latex_benchmark_table,
     generate_latex_closed_set_table,
@@ -216,7 +221,8 @@ def evaluate_method_configuration(
             device=device,
         )
         ckpt_base_dir = Path(kwargs.get("checkpoint_dir", "checkpoints"))
-        baseline.fit(
+        t_base_start = time.perf_counter()
+        fit_history = baseline.fit(
             client_datasets=client_datasets,
             num_rounds=rounds,
             epochs=config.federated.local_epochs,
@@ -226,6 +232,9 @@ def evaluate_method_configuration(
             checkpoint_dir=str(ckpt_base_dir / f"{target_ds_name}_b{beta_dirichlet if beta_dirichlet is not None else 'iid'}"),
             resume=kwargs.get("resume", True),
         )
+        t_base_fit = time.perf_counter() - t_base_start
+
+        t_base_eval_start = time.perf_counter()
         res = baseline.evaluate(
             test_open_ds=test_open_ds,
             test_closed_ds=test_closed_ds,
@@ -234,12 +243,31 @@ def evaluate_method_configuration(
             scoring_method=scoring_method,
             use_mondrian=use_mondrian,
         )
+        t_base_eval = time.perf_counter() - t_base_eval_start
+
+        base_model = getattr(baseline, "model", None) or getattr(baseline, "global_model", None)
+        num_params_base = sum(p.numel() for p in base_model.parameters()) if base_model is not None else 0
+        base_comm_bytes = int(2 * num_params_base * 4 * rounds)
+
+        res["method_name"] = method_name
+        res["dataset_name"] = target_ds_name
+        res["beta_dirichlet"] = beta_dirichlet
+        res["rounds"] = rounds
+        res["seed"] = config.experiment.seed
+        res["num_clients"] = config.federated.num_clients
+        res["num_known_classes"] = num_known
+        res["round_history"] = fit_history if isinstance(fit_history, list) else []
+        res["fit_wall_time_sec"] = float(t_base_fit)
+        res["eval_wall_time_sec"] = float(t_base_eval)
+        res["total_wall_time_sec"] = float(t_base_fit + t_base_eval)
+        res["total_comm_bytes_per_client"] = base_comm_bytes
+        res["n_train"] = len(train_ds)
+        res["n_test_closed"] = len(test_closed_ds)
+        res["n_test_open"] = len(test_open_ds)
+
         if eval_mode == "closed_set":
-            return {
-                "accuracy": res["accuracy"],
-                "balanced_accuracy": res["balanced_accuracy"],
-                "macro_f1": res["closed_set_macro_f1"],
-            }
+            res["macro_f1"] = res["closed_set_macro_f1"]
+            return res
         return res
 
     cal_client_indices = partition_dirichlet_non_iid(
@@ -290,10 +318,18 @@ def evaluate_method_configuration(
 
     t_p1_start = time.perf_counter()
     log_interval = max(1, rounds // 10) if rounds >= 20 else max(1, rounds // 5)
+    test_closed_x = test_closed_ds.features.to(device)
+    test_closed_y = test_closed_ds.labels.numpy()
+    round_history: List[Dict[str, Any]] = []
+
     for r in range(start_round, rounds + 1):
         t_r0 = time.perf_counter()
         r_loss = server.run_round(r)
         
+        r_entry = dict(r_loss) if isinstance(r_loss, dict) else {"train_loss": float(r_loss)}
+        r_entry["round"] = r
+        r_entry["elapsed_sec"] = float(time.perf_counter() - t_p1_start)
+
         # Save periodic checkpoint to disk / Google Drive
         if r % log_interval == 0 or r == rounds:
             torch.save({
@@ -302,68 +338,85 @@ def evaluate_method_configuration(
             }, latest_ckpt)
 
         if r == 1 or r % log_interval == 0 or r == rounds:
+            with torch.no_grad():
+                logits_c = server.global_model.classify(test_closed_x)
+                preds_c = torch.argmax(logits_c, dim=-1).cpu().numpy()
+                c_acc = float(np.mean(preds_c == test_closed_y))
+            r_entry["val_closed_accuracy"] = c_acc
             elapsed = time.perf_counter() - t_p1_start
             r_sec = time.perf_counter() - t_r0
             rounds_done = r - start_round + 1
             avg_sec = elapsed / max(rounds_done, 1)
             eta_sec = avg_sec * (rounds - r)
-            loss_val = r_loss.get("train_loss", r_loss.get("loss_bla", 0.0)) if isinstance(r_loss, dict) else 0.0
+            loss_val = r_entry.get("train_loss", r_entry.get("loss_bla", 0.0))
             print(
-                f"    [FedTROS-MC] Round {r:3d}/{rounds} | Loss: {loss_val:.4f} | "
+                f"    [FedTROS-MC] Round {r:3d}/{rounds} | Loss: {loss_val:.4f} | Val Acc: {c_acc * 100:.2f}% | "
                 f"Speed: {r_sec:.2f}s/rnd | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
                 flush=True,
             )
+        round_history.append(r_entry)
 
+    t_phase1 = time.perf_counter() - t_p1_start
     # Freeze encoder permanently (Section 4.1 & 4.3)
     server.freeze_global_encoder()
 
     num_known = len(config.data.known_classes)
 
-    if eval_mode == "closed_set":
-        # Closed-Set Classification using Stage 2/3 Mahalanobis profiles (since g_psi is discarded after Stage 1)
-        server.run_phase_two_profiling(
-            num_blocks=config.federated.num_blocks,
-            block_dim=config.federated.block_dim,
-            alpha=config.osr.conformal_alpha,
-        )
-        edge_detector = server.get_edge_detector(
-            unknown_label=num_known,
-            num_blocks=config.federated.num_blocks,
-            block_dim=config.federated.block_dim,
-        )
-        _, _, preds_closed, _ = edge_detector.predict_batch(test_closed_ds.features)
-
-        y_closed_true = test_closed_ds.labels.numpy()
-        closed_metrics = compute_classification_metrics(
-            y_true=y_closed_true,
-            y_pred=preds_closed,
-            num_classes=num_known,
-        )
-        return closed_metrics
-
-    # Phase II: Zero-Leakage Federated Class Profiling via Law of Total Variance (Algorithm 2 Lines 120-132)
+    # Phase II: Zero-Leakage Federated Class Profiling via Law of Total Variance
+    t_p2_start = time.perf_counter()
     server.run_phase_two_profiling(
         num_blocks=config.federated.num_blocks,
         block_dim=config.federated.block_dim,
         alpha=config.osr.conformal_alpha,
     )
+    t_phase2 = time.perf_counter() - t_p2_start
 
-    # Phase III: Wire-Speed Block-Diagonal Mahalanobis Edge Detector (Algorithm 2 Lines 133-148)
+    num_params = sum(p.numel() for p in server.global_model.parameters())
+    p1_bytes = int(2 * num_params * 4 * rounds)
+    p2_bytes = int(num_known * (config.model.latent_dim + config.federated.num_blocks * (config.federated.block_dim ** 2) + 2) * 4)
+
+    # Phase III: Wire-Speed Block-Diagonal Mahalanobis Edge Detector
     edge_detector = server.get_edge_detector(
         unknown_label=num_known,
         num_blocks=config.federated.num_blocks,
         block_dim=config.federated.block_dim,
     )
 
-    # Evaluate on open-set and closed-set test data using regularized Mahalanobis profiles (g_psi discarded)
-    preds_open, is_unk, cand, anomaly_scores = edge_detector.predict_batch(test_open_ds.features)
+    if eval_mode == "closed_set":
+        _, _, preds_closed, _ = edge_detector.predict_batch(test_closed_ds.features)
+        y_closed_true = test_closed_ds.labels.numpy()
+        closed_metrics = compute_classification_metrics(
+            y_true=y_closed_true,
+            y_pred=preds_closed,
+            num_classes=num_known,
+        )
+        closed_metrics["round_history"] = round_history
+        closed_metrics["phase1_wall_time_sec"] = float(t_phase1)
+        closed_metrics["phase2_wall_time_sec"] = float(t_phase2)
+        closed_metrics["total_wall_time_sec"] = float(t_phase1 + t_phase2)
+        closed_metrics["phase1_comm_bytes_per_client"] = p1_bytes
+        closed_metrics["phase2_comm_bytes_per_client"] = p2_bytes
+        closed_metrics["total_comm_bytes_per_client"] = p1_bytes + p2_bytes
+        closed_metrics["method_name"] = method_name
+        closed_metrics["dataset_name"] = target_ds_name
+        closed_metrics["beta_dirichlet"] = beta_dirichlet
+        closed_metrics["rounds"] = rounds
+        closed_metrics["seed"] = config.experiment.seed
+        closed_metrics["num_clients"] = config.federated.num_clients
+        closed_metrics["num_classes"] = num_known
+        closed_metrics["n_train"] = len(train_ds)
+        closed_metrics["n_test_closed"] = len(test_closed_ds)
+        return closed_metrics
+
+    # Evaluate on open-set and closed-set test data using regularized Mahalanobis profiles
+    det = edge_detector.predict_batch_detailed(test_open_ds.features)
     _, _, preds_closed, _ = edge_detector.predict_batch(test_closed_ds.features)
 
     y_open_true = test_open_ds.labels.numpy()
     metrics = compute_osr_metrics(
         y_true=y_open_true,
-        y_pred=preds_open,
-        anomaly_scores=anomaly_scores,
+        y_pred=det["predictions"],
+        anomaly_scores=det["normalized_scores"],
         num_known_classes=num_known,
         unknown_label=num_known,
     )
@@ -375,9 +428,50 @@ def evaluate_method_configuration(
         num_classes=num_known,
     )
 
+    cm_before = compute_confusion_matrix(y_open_true, det["candidate_classes"], labels=list(range(num_known + 1)))
+    cm_after = compute_confusion_matrix(y_open_true, det["predictions"], labels=list(range(num_known + 1)))
+
     metrics["closed_set_accuracy"] = closed_metrics["accuracy"]
     metrics["accuracy"] = closed_metrics["accuracy"]
+    metrics["closed_set_balanced_accuracy"] = closed_metrics["balanced_accuracy"]
     metrics["closed_set_macro_f1"] = closed_metrics["macro_f1"]
+    metrics["closed_set_class_wise_f1"] = closed_metrics.get("class_wise_f1", [])
+    metrics["closed_set_confusion_matrix"] = closed_metrics.get("confusion_matrix", [])
+
+    metrics["round_history"] = round_history
+    metrics["phase1_wall_time_sec"] = float(t_phase1)
+    metrics["phase2_wall_time_sec"] = float(t_phase2)
+    metrics["total_wall_time_sec"] = float(t_phase1 + t_phase2)
+    metrics["phase1_comm_bytes_per_client"] = p1_bytes
+    metrics["phase2_comm_bytes_per_client"] = p2_bytes
+    metrics["total_comm_bytes_per_client"] = p1_bytes + p2_bytes
+    metrics["confusion_matrix_before"] = cm_before.tolist()
+    metrics["confusion_matrix_after"] = cm_after.tolist()
+    metrics["thresholds"] = {int(k): float(v) for k, v in server.calibration_thresholds.items()}
+    metrics["method_name"] = method_name
+    metrics["dataset_name"] = target_ds_name
+    metrics["beta_dirichlet"] = beta_dirichlet
+    metrics["rounds"] = rounds
+    metrics["seed"] = config.experiment.seed
+    metrics["num_clients"] = config.federated.num_clients
+    metrics["num_known_classes"] = num_known
+    metrics["n_train"] = len(train_ds)
+    metrics["n_test_closed"] = len(test_closed_ds)
+    metrics["n_test_open"] = len(test_open_ds)
+
+    fpr_pts, tpr_pts = compute_roc_curve_points((y_open_true == num_known).astype(int), det["normalized_scores"])
+    prec_pts, rec_pts = compute_pr_curve_points((y_open_true == num_known).astype(int), det["normalized_scores"])
+
+    def _sample_curve(x_arr: np.ndarray, y_arr: np.ndarray, num_pts: int = 50) -> Tuple[List[float], List[float]]:
+        if len(x_arr) <= num_pts:
+            return [round(float(v), 5) for v in x_arr], [round(float(v), 5) for v in y_arr]
+        idx = np.linspace(0, len(x_arr) - 1, num_pts, dtype=int)
+        return [round(float(x_arr[i]), 5) for i in idx], [round(float(y_arr[i]), 5) for i in idx]
+
+    roc_fpr, roc_tpr = _sample_curve(fpr_pts, tpr_pts)
+    pr_prec, pr_rec = _sample_curve(prec_pts, rec_pts)
+    metrics["roc_curve"] = {"fpr": roc_fpr, "tpr": roc_tpr}
+    metrics["pr_curve"] = {"precision": pr_prec, "recall": pr_rec}
 
     return metrics
 
