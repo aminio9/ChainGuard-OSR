@@ -221,6 +221,7 @@ class WireSpeedEdgeDetector:
         )
 
         class_keys = list(self.profiles.keys())
+        class_keys_tensor = torch.tensor(class_keys, dtype=torch.int64, device=device)
         # Stack distances into (N, C)
         dist_matrix = torch.stack([dists[c] for c in class_keys], dim=1)  # (N, C)
 
@@ -237,35 +238,27 @@ class WireSpeedEdgeDetector:
         best_indices = torch.argmin(norm_dist_matrix, dim=1)  # (N,)
 
         # Set-based acceptance matrix: accepted_mask[i, j] is True iff D_block(z_i, c_j) <= tau_{alpha, c_j}
-        accepted_mask = dist_matrix <= thresholds.unsqueeze(0)
+        accepted_mask = dist_matrix <= thresholds.unsqueeze(0)  # (N, C) bool
 
-        preds = []
-        is_unknown_list = []
-        cand_list = []
-        scores_list = []
+        has_accepted_class = torch.any(accepted_mask, dim=1)
+        is_unknown_tensor = ~has_accepted_class
+        cand_tensor = class_keys_tensor[best_indices]
+        preds_tensor = torch.where(
+            is_unknown_tensor,
+            torch.tensor(self.unknown_label, dtype=torch.int64, device=device),
+            cand_tensor,
+        )
 
-        for i in range(len(x)):
-            best_idx = int(best_indices[i].item())
-            cand_c = class_keys[best_idx]
-            norm_score = float(norm_dist_matrix[i, best_idx].item())
-            raw_score = float(dist_matrix[i, best_idx].item())
-            tau_val = float(thresholds[best_idx].item())
-
-            # Set-based rejection rule: reject iff no known class is accepted (C_{1-alpha}(x_i) == empty)
-            has_accepted_class = bool(torch.any(accepted_mask[i]).item())
-            is_unk = not has_accepted_class
-            pred = self.unknown_label if is_unk else cand_c
-
-            preds.append(pred)
-            is_unknown_list.append(is_unk)
-            cand_list.append(cand_c)
-            scores_list.append(norm_score if (tau_val > 0.0 and math.isfinite(tau_val)) else raw_score)
+        best_norm_scores = torch.gather(norm_dist_matrix, 1, best_indices.unsqueeze(1)).squeeze(1)
+        best_raw_scores = torch.gather(dist_matrix, 1, best_indices.unsqueeze(1)).squeeze(1)
+        best_tau_valid = valid_tau[best_indices]
+        scores_tensor = torch.where(best_tau_valid, best_norm_scores, best_raw_scores)
 
         return (
-            np.array(preds, dtype=np.int64),
-            np.array(is_unknown_list, dtype=bool),
-            np.array(cand_list, dtype=np.int64),
-            np.array(scores_list, dtype=np.float32),
+            preds_tensor.cpu().numpy().astype(np.int64),
+            is_unknown_tensor.cpu().numpy().astype(bool),
+            cand_tensor.cpu().numpy().astype(np.int64),
+            scores_tensor.cpu().numpy().astype(np.float32),
         )
 
     @torch.no_grad()
@@ -283,6 +276,7 @@ class WireSpeedEdgeDetector:
             z_batch, self.profiles, num_blocks=self.num_blocks, block_dim=self.block_dim
         )
         class_keys = list(self.profiles.keys())
+        class_keys_tensor = torch.tensor(class_keys, dtype=torch.int64, device=device)
         dist_matrix = torch.stack([dists[c] for c in class_keys], dim=1)
         thresholds = torch.tensor(
             [self.profiles[c].conformal_threshold for c in class_keys],
@@ -296,28 +290,28 @@ class WireSpeedEdgeDetector:
         best_norm_indices = torch.argmin(norm_dist_matrix, dim=1)
         accepted_mask = dist_matrix <= thresholds.unsqueeze(0)
 
-        preds, is_unk_list, cand_list, norm_scores, raw_scores, tau_used, pred_sets = [], [], [], [], [], [], []
-        for i in range(len(x)):
-            best_raw_idx = int(best_raw_indices[i].item())
-            best_norm_idx = int(best_norm_indices[i].item())
-            cand_c = class_keys[best_norm_idx]
-            pset = [class_keys[j] for j in range(len(class_keys)) if bool(accepted_mask[i, j].item())]
-            is_unk = len(pset) == 0
-            preds.append(self.unknown_label if is_unk else cand_c)
-            is_unk_list.append(is_unk)
-            cand_list.append(cand_c)
-            norm_scores.append(float(norm_dist_matrix[i, best_norm_idx].item()))
-            raw_scores.append(float(dist_matrix[i, best_raw_idx].item()))
-            tau_used.append(float(thresholds[best_norm_idx].item()))
-            pred_sets.append(pset)
+        is_unk_tensor = ~torch.any(accepted_mask, dim=1)
+        cand_tensor = class_keys_tensor[best_norm_indices]
+        preds_tensor = torch.where(
+            is_unk_tensor,
+            torch.tensor(self.unknown_label, dtype=torch.int64, device=device),
+            cand_tensor,
+        )
+        norm_scores_tensor = torch.gather(norm_dist_matrix, 1, best_norm_indices.unsqueeze(1)).squeeze(1)
+        raw_scores_tensor = torch.gather(dist_matrix, 1, best_raw_indices.unsqueeze(1)).squeeze(1)
+        tau_used_tensor = thresholds[best_norm_indices]
+
+        # Single transfer to CPU for set comprehension
+        accepted_cpu = accepted_mask.cpu().numpy()
+        pred_sets = [[class_keys[j] for j, acc in enumerate(row) if acc] for row in accepted_cpu]
 
         return {
-            "predictions": np.array(preds, dtype=np.int64),
-            "is_unknown": np.array(is_unk_list, dtype=bool),
-            "candidate_classes": np.array(cand_list, dtype=np.int64),
-            "normalized_scores": np.array(norm_scores, dtype=np.float32),
-            "raw_scores": np.array(raw_scores, dtype=np.float32),
-            "thresholds_used": np.array(tau_used, dtype=np.float32),
+            "predictions": preds_tensor.cpu().numpy().astype(np.int64),
+            "is_unknown": is_unk_tensor.cpu().numpy().astype(bool),
+            "candidate_classes": cand_tensor.cpu().numpy().astype(np.int64),
+            "normalized_scores": norm_scores_tensor.cpu().numpy().astype(np.float32),
+            "raw_scores": raw_scores_tensor.cpu().numpy().astype(np.float32),
+            "thresholds_used": tau_used_tensor.cpu().numpy().astype(np.float32),
             "prediction_sets": pred_sets,
             "latent_z": z_batch.detach().cpu().numpy(),
         }

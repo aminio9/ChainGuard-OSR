@@ -57,7 +57,8 @@ class FedProxBaseline(BaseBaseline):
     ) -> Dict[str, float]:
         """Execute one communication round with proximal penalty."""
         self.model.eval()
-        global_state = copy.deepcopy(self.model.state_dict())
+        global_state = self.model.state_dict()
+        global_params = {name_p: p.detach().clone() for name_p, p in self.model.named_parameters()}
 
         client_weights: List[Dict[str, torch.Tensor]] = []
         client_sample_sizes: List[int] = []
@@ -66,16 +67,26 @@ class FedProxBaseline(BaseBaseline):
 
         criterion = nn.CrossEntropyLoss()
 
+        if not hasattr(self, "_local_model"):
+            self._local_model = FedAvgModel(
+                in_features=self.in_features,
+                num_classes=self.num_classes,
+                latent_dim=self.latent_dim,
+                hidden_dim=self.hidden_dim,
+            ).to(self.device)
+
+        local_model = self._local_model
+
         for c_idx, c_data in enumerate(client_datasets):
             if len(c_data) < 2:
                 continue
 
-            local_model = copy.deepcopy(self.model)
+            local_model.load_state_dict(global_state)
             local_model.train()
             optimizer = create_baseline_optimizer(local_model, lr=lr, optimizer_name=kwargs.get("optimizer_name", "adam"))
             loader = DataLoader(c_data, batch_size=batch_size, shuffle=True, drop_last=(len(c_data) > batch_size))
 
-            client_loss = 0.0
+            client_running_loss = torch.tensor(0.0, device=self.device)
             steps = 0
             for _ in range(epochs):
                 for x_b, y_b in loader:
@@ -88,24 +99,25 @@ class FedProxBaseline(BaseBaseline):
                     logits, _ = local_model(x_b)
                     loss_ce = criterion(logits, y_b)
 
-                    # Proximal term: (mu / 2) * ||w - w_t||^2
-                    prox_loss = 0.0
-                    for name_p, param in local_model.named_parameters():
-                        if name_p in global_state:
-                            prox_loss += torch.norm(param - global_state[name_p].to(self.device)) ** 2
+                    # Proximal term: (mu / 2) * ||w - w_t||^2 using pre-cloned on-device parameters
+                    prox_loss = sum(
+                        torch.sum((param - global_params[name_p]) ** 2)
+                        for name_p, param in local_model.named_parameters()
+                        if name_p in global_params
+                    )
                     loss = loss_ce + 0.5 * self.mu_prox * prox_loss
 
                     loss.backward()
                     nn.utils.clip_grad_norm_(local_model.parameters(), max_norm=1.0)
                     optimizer.step()
 
-                    client_loss += loss.item()
+                    client_running_loss += loss.detach()
                     steps += 1
 
-            client_weights.append(local_model.state_dict())
+            client_weights.append({k: v.clone() for k, v in local_model.state_dict().items()})
             client_sample_sizes.append(len(c_data))
             if steps > 0:
-                total_loss += client_loss / steps
+                total_loss += float((client_running_loss / float(steps)).item())
                 active_clients += 1
 
         # Coordinate-wise weighted averaging

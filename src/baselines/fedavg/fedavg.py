@@ -83,7 +83,7 @@ class FedAvgBaseline(BaseBaseline):
     ) -> Dict[str, float]:
         """Execute one communication round of FedAvg."""
         self.model.eval()
-        global_state = copy.deepcopy(self.model.state_dict())
+        global_state = self.model.state_dict()
 
         client_weights: List[Dict[str, torch.Tensor]] = []
         client_sample_sizes: List[int] = []
@@ -92,16 +92,26 @@ class FedAvgBaseline(BaseBaseline):
 
         criterion = nn.CrossEntropyLoss()
 
+        if not hasattr(self, "_local_model"):
+            self._local_model = FedAvgModel(
+                in_features=self.in_features,
+                num_classes=self.num_classes,
+                latent_dim=self.latent_dim,
+                hidden_dim=self.hidden_dim,
+            ).to(self.device)
+
+        local_model = self._local_model
+
         for c_idx, c_data in enumerate(client_datasets):
             if len(c_data) < 2:
                 continue
 
-            local_model = copy.deepcopy(self.model)
+            local_model.load_state_dict(global_state)
             local_model.train()
             optimizer = create_baseline_optimizer(local_model, lr=lr, optimizer_name=kwargs.get("optimizer_name", "adam"))
             loader = DataLoader(c_data, batch_size=batch_size, shuffle=True, drop_last=(len(c_data) > batch_size))
 
-            client_loss = 0.0
+            client_running_loss = torch.tensor(0.0, device=self.device)
             steps = 0
             for _ in range(epochs):
                 for x_b, y_b in loader:
@@ -117,13 +127,13 @@ class FedAvgBaseline(BaseBaseline):
                     nn.utils.clip_grad_norm_(local_model.parameters(), max_norm=1.0)
                     optimizer.step()
 
-                    client_loss += loss.item()
+                    client_running_loss += loss.detach()
                     steps += 1
 
-            client_weights.append(local_model.state_dict())
+            client_weights.append({k: v.clone() for k, v in local_model.state_dict().items()})
             client_sample_sizes.append(len(c_data))
             if steps > 0:
-                total_loss += client_loss / steps
+                total_loss += float((client_running_loss / float(steps)).item())
                 active_clients += 1
 
         # FedAvg Aggregation: coordinate-wise weighted average

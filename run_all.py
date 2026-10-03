@@ -11,7 +11,6 @@ import argparse
 import os
 import sys
 import time
-import tracemalloc
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -108,7 +107,8 @@ def run_fedtros_mc_full_diagnostics(
         sub_ds = FlowDataset(train_ds.features[idx_t], train_ds.labels[idx_t])
         clients.append(FederatedClient(cid, sub_ds, cfg, device, cal_dataset=cal_ds))
 
-    tracemalloc.start()
+    if torch.cuda.is_available() and device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     t0 = time.perf_counter()
     server = FederatedServer(config=cfg, clients=clients, device=device)
 
@@ -116,13 +116,19 @@ def run_fedtros_mc_full_diagnostics(
     num_known = len(cfg.data.known_classes)
     t_p1_start = time.perf_counter()
     log_interval = max(1, rounds // 10) if rounds >= 20 else max(1, rounds // 5)
+    
+    test_closed_x = test_closed_ds.features.to(device)
+    test_closed_y = test_closed_ds.labels.numpy()
+    c_acc = 0.0
+
     for r in range(1, rounds + 1):
         t_r0 = time.perf_counter()
         r_loss = server.run_round(r)
-        with torch.no_grad():
-            logits_c = server.global_model.classify(test_closed_ds.features.to(device))
-            preds_c = torch.argmax(logits_c, dim=-1).cpu().numpy()
-            c_acc = float(np.mean(preds_c == test_closed_ds.labels.numpy()))
+        if r == 1 or r % log_interval == 0 or r == rounds:
+            with torch.no_grad():
+                logits_c = server.global_model.classify(test_closed_x)
+                preds_c = torch.argmax(logits_c, dim=-1).cpu().numpy()
+                c_acc = float(np.mean(preds_c == test_closed_y))
         r_entry = dict(r_loss)
         r_entry["val_closed_accuracy"] = c_acc
         round_history.append(r_entry)
@@ -147,8 +153,11 @@ def run_fedtros_mc_full_diagnostics(
         cal_dataset=cal_ds,
     )
     t_phase2 = time.perf_counter() - t1
-    _, peak_mem_bytes = tracemalloc.get_traced_memory()
-    tracemalloc.stop()
+    peak_mem_bytes = (
+        torch.cuda.max_memory_allocated(device)
+        if (torch.cuda.is_available() and device.type == "cuda")
+        else 0
+    )
 
     detector = server.get_edge_detector(
         unknown_label=num_known, num_blocks=num_blocks, block_dim=block_dim

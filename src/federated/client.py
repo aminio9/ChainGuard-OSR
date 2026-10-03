@@ -164,7 +164,8 @@ class FederatedClient:
 
         drop_last = len(self.dataset) > batch_size
         loader = DataLoader(self.dataset, batch_size=batch_size, shuffle=True, drop_last=drop_last)
-        epoch_losses: List[Dict[str, float]] = []
+        running_totals = torch.zeros(3, device=self.device)
+        total_batches = 0
 
         for _ in range(epochs):
             for x_batch, y_batch in loader:
@@ -184,6 +185,7 @@ class FederatedClient:
                     mu=mu,
                     logvar=logvar,
                     class_priors=self.class_priors,
+                    return_tensors=True,
                 )
 
                 total_loss.backward()
@@ -191,13 +193,20 @@ class FederatedClient:
                 nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
-                epoch_losses.append(breakdown)
+                running_totals[0] += total_loss.detach()
+                running_totals[1] += breakdown["loss_bla"].detach()
+                running_totals[2] += breakdown["loss_vib"].detach()
+                total_batches += 1
 
-        # Compute average metrics across all batches
+        # Compute average metrics across all batches (single GPU->CPU transfer)
         avg_metrics: Dict[str, float] = {}
-        if epoch_losses:
-            for k in epoch_losses[0].keys():
-                avg_metrics[k] = float(np.mean([entry[k] for entry in epoch_losses]))
+        if total_batches > 0:
+            avg_tensors = (running_totals / float(total_batches)).cpu().tolist()
+            avg_metrics = {
+                "loss_total": float(avg_tensors[0]),
+                "loss_bla": float(avg_tensors[1]),
+                "loss_vib": float(avg_tensors[2]),
+            }
 
         return self.get_parameters(), {}, avg_metrics
 
@@ -231,8 +240,8 @@ class FederatedClient:
         for x_b, y_b in loader:
             x_dev = x_b.to(self.device)
             mu_z = extract_latent_mu(frozen_encoder, x_dev)
-            all_z.append(mu_z.cpu())
-            all_y.append(y_b.cpu())
+            all_z.append(mu_z)
+            all_y.append(y_b.to(self.device))
 
         z_all = torch.cat(all_z, dim=0)
         y_all = torch.cat(all_y, dim=0)
@@ -266,13 +275,13 @@ class FederatedClient:
 
                 diff_b = z_c_b - mu_c_b.unsqueeze(0)  # (count, d_b)
                 cov_b = torch.matmul(diff_b.t(), diff_b) / float(count)
-                block_covs.append(cov_b)
+                block_covs.append(cov_b.cpu())
 
             moments_list.append(
                 ClientClassMoment(
                     client_id=self.client_id,
                     sample_count=count,
-                    mu=mu_k_c,
+                    mu=mu_k_c.cpu(),
                     block_covs=block_covs,
                     cal_quantile=None,
                     class_id=c,

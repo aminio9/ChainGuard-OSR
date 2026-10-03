@@ -120,43 +120,67 @@ class OpenMaxBaseline(BaseBaseline):
     def _compute_openmax_probs(self, logits: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         """Compute OpenMax revised activation vectors and pseudo-unknown probability."""
         batch_size = logits.size(0)
-        z_np = z.detach().cpu().numpy()
-        logits_np = logits.detach().cpu().numpy()
+        device = logits.device
 
-        modified_logits = np.zeros((batch_size, self.num_classes + 1), dtype=np.float32)
+        # Stack class MAVs into tensor
+        mavs_arr = np.array(
+            [self.mavs.get(c, np.zeros(self.latent_dim)) for c in range(self.num_classes)],
+            dtype=np.float32,
+        )
+        mavs_t = torch.tensor(mavs_arr, device=device)  # (num_classes, latent_dim)
 
-        for i in range(batch_size):
-            ranked_classes = np.argsort(logits_np[i])[::-1]
-            revised_v = logits_np[i].copy()
-            unk_v = 0.0
+        # Pairwise Euclidean distances: (batch_size, num_classes)
+        dists = torch.cdist(z.float(), mavs_t)
 
-            for rank in range(min(self.alpha_rank, self.num_classes)):
-                c = ranked_classes[rank]
-                weight = 1.0 - (rank / float(self.alpha_rank))
-                dist = np.linalg.norm(z_np[i] - self.mavs[c])
+        num_ranks = min(self.alpha_rank, self.num_classes)
+        ranked_classes = torch.argsort(logits, dim=-1, descending=True)[:, :num_ranks]  # (batch_size, num_ranks)
 
-                if c in self.weibull_models:
-                    shape, scale, tau_d = self.weibull_models[c]
-                    if dist > tau_d and scale > 0:
-                        scaled_dist = (dist - tau_d) / scale
-                        exponent = np.clip(scaled_dist ** min(shape, 20.0), 0.0, 100.0)
-                        w_score = 1.0 - np.exp(-exponent)
-                    else:
-                        w_score = 0.0
-                else:
-                    w_score = 0.0
+        shapes, scales, tau_ds, has_mods = [], [], [], []
+        for c in range(self.num_classes):
+            if c in self.weibull_models and self.weibull_models[c][1] > 0:
+                sh, sc, td = self.weibull_models[c]
+                has_mods.append(True)
+            else:
+                sh, sc, td = 1.0, 1.0, 0.0
+                has_mods.append(False)
+            shapes.append(min(float(sh), 20.0))
+            scales.append(float(sc) if float(sc) > 0 else 1.0)
+            tau_ds.append(float(td))
 
-                w_score = float(np.clip(w_score, 0.0, 1.0))
-                omega = 1.0 - weight * w_score
-                revised_v[c] = logits_np[i, c] * omega
-                unk_v += logits_np[i, c] * (1.0 - omega)
+        shapes_t = torch.tensor(shapes, dtype=torch.float32, device=device)
+        scales_t = torch.tensor(scales, dtype=torch.float32, device=device)
+        tau_ds_t = torch.tensor(tau_ds, dtype=torch.float32, device=device)
+        has_model_t = torch.tensor(has_mods, dtype=torch.bool, device=device)
 
-            modified_logits[i, 0] = unk_v  # Class 0 represents unknown
-            modified_logits[i, 1:] = revised_v
+        revised_logits = logits.clone().float()
+        unk_v = torch.zeros(batch_size, dtype=torch.float32, device=device)
 
-        # Softmax over (num_classes + 1)
-        mod_t = torch.tensor(modified_logits, device=self.device)
-        return torch.softmax(mod_t, dim=-1)
+        for rank in range(num_ranks):
+            c_rank = ranked_classes[:, rank]  # (batch_size,)
+            weight = 1.0 - (rank / float(self.alpha_rank))
+
+            dist_rank = torch.gather(dists, 1, c_rank.unsqueeze(1)).squeeze(1)
+            tau_rank = tau_ds_t[c_rank]
+            scale_rank = scales_t[c_rank]
+            shape_rank = shapes_t[c_rank]
+            has_mod = has_model_t[c_rank]
+
+            scaled_dist = torch.clamp((dist_rank - tau_rank) / scale_rank, min=0.0)
+            exponent = torch.clamp(torch.pow(scaled_dist, shape_rank), 0.0, 100.0)
+            w_score = torch.where(
+                has_mod & (dist_rank > tau_rank),
+                1.0 - torch.exp(-exponent),
+                torch.zeros_like(dist_rank),
+            )
+            w_score = torch.clamp(w_score, 0.0, 1.0)
+            omega = 1.0 - weight * w_score
+
+            orig_logit = torch.gather(logits.float(), 1, c_rank.unsqueeze(1)).squeeze(1)
+            revised_logits.scatter_(1, c_rank.unsqueeze(1), (orig_logit * omega).unsqueeze(1))
+            unk_v += orig_logit * (1.0 - omega)
+
+        modified_logits = torch.cat([unk_v.unsqueeze(1), revised_logits], dim=1)
+        return torch.softmax(modified_logits, dim=-1)
 
     def predict_batch(self, x: torch.Tensor) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Predict labels and OpenMax anomaly scores."""

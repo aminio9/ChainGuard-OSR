@@ -47,8 +47,9 @@ class CompositeLossCalculator:
         logvar: torch.Tensor,
         class_priors: Optional[torch.Tensor] = None,
         samples_per_class: Optional[Union[List[int], np.ndarray, torch.Tensor]] = None,
+        return_tensors: bool = False,
         **kwargs: Any,  # Gracefully accept legacy unused arguments (teacher_logits, t_ratio, etc.)
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Compute Phase I loss components.
 
         Args:
@@ -58,6 +59,7 @@ class CompositeLossCalculator:
             logvar: Latent representation log-variance from VIB log sigma^2(x; theta).
             class_priors: Precomputed Laplace class priors pi^{(k)}.
             samples_per_class: Class-frequency distribution if priors are not precomputed.
+            return_tensors: If True, returns detached tensors in breakdown to avoid GPU-CPU sync stalls.
 
         Returns:
             (total_loss, breakdown_metrics)
@@ -89,10 +91,17 @@ class CompositeLossCalculator:
         # 4. Total Loss
         total_loss = l_bla + self.lambda_vib * l_vib
 
-        breakdown = {
-            "loss_total": float(total_loss.item()),
-            "loss_bla": float(l_bla.item()),
-            "loss_vib": float(l_vib.item()),
-        }
+        if return_tensors:
+            breakdown = {
+                "loss_total": total_loss.detach(),
+                "loss_bla": l_bla.detach(),
+                "loss_vib": l_vib.detach(),
+            }
+        else:
+            breakdown = {
+                "loss_total": float(total_loss.item()),
+                "loss_bla": float(l_bla.item()),
+                "loss_vib": float(l_vib.item()),
+            }
 
         return total_loss, breakdown
