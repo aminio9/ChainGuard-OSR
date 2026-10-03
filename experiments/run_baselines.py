@@ -173,7 +173,9 @@ def evaluate_method_configuration(
             )
 
     if eval_mode == "closed_set":
-        # Strict Closed-Set Discipline: Zero sequestered unknown classes (LaTeX Section 6.2)
+        # Strict Closed-Set Discipline: All classes in dataset become known; zero sequestered unknown classes (LaTeX Section 6.2)
+        all_classes = sorted(list(set(config.data.known_classes + config.data.unknown_classes)))
+        config.data.known_classes = all_classes
         config.data.unknown_classes = []
 
     train_ds, cal_ds, test_closed_ds, test_open_ds = split_open_set_dataset(
@@ -230,7 +232,7 @@ def evaluate_method_configuration(
             lr=config.optimization.learning_rate,
             optimizer_name=config.optimization.optimizer,
             checkpoint_dir=str(ckpt_base_dir / f"{target_ds_name}_b{beta_dirichlet if beta_dirichlet is not None else 'iid'}"),
-            resume=kwargs.get("resume", True),
+            resume=kwargs.get("resume", True) and not kwargs.get("force_retrain", False),
         )
         t_base_fit = time.perf_counter() - t_base_start
 
@@ -300,18 +302,31 @@ def evaluate_method_configuration(
     latest_ckpt = ckpt_dir / "checkpoint_latest.pt"
 
     start_round = 1
-    resume_enabled = kwargs.get("resume", True)
+    resume_enabled = kwargs.get("resume", True) and not kwargs.get("force_retrain", False)
     if resume_enabled and latest_ckpt.exists():
         try:
             saved_state = torch.load(latest_ckpt, map_location=device, weights_only=False)
-            server.global_model.load_state_dict(saved_state["model_state_dict"])
-            saved_r = saved_state.get("round", 0)
-            if saved_r < rounds:
-                start_round = saved_r + 1
-                print(f"    [CHECKPOINT RESUME] Resuming {method_name} from Round {start_round}/{rounds} via {latest_ckpt}...", flush=True)
+            saved_sd = saved_state.get("model_state_dict", {})
+            first_w = saved_sd.get("encoder.network.0.weight", None)
+            saved_in_f = first_w.shape[1] if first_w is not None else saved_state.get("in_features", None)
+            curr_in_f = config.model.in_features
+
+            if saved_in_f is not None and saved_in_f != curr_in_f:
+                print(
+                    f"    [CHECKPOINT INCOMPATIBLE] Found checkpoint with in_features={saved_in_f}, "
+                    f"but current model expects in_features={curr_in_f}. Starting fresh with zero leakage.",
+                    flush=True,
+                )
+                start_round = 1
             else:
-                print(f"    [CHECKPOINT COMPLETED] Found completed {saved_r}/{rounds} rounds in {latest_ckpt}. Skipping training loop.", flush=True)
-                start_round = rounds + 1
+                server.global_model.load_state_dict(saved_sd)
+                saved_r = saved_state.get("round", 0)
+                if saved_r < rounds:
+                    start_round = saved_r + 1
+                    print(f"    [CHECKPOINT RESUME] Resuming {method_name} from Round {start_round}/{rounds} via {latest_ckpt}...", flush=True)
+                else:
+                    print(f"    [CHECKPOINT COMPLETED] Found completed {saved_r}/{rounds} rounds in {latest_ckpt}. Skipping training loop.", flush=True)
+                    start_round = rounds + 1
         except Exception as e:
             print(f"    [CHECKPOINT WARNING] Could not load {latest_ckpt}: {e}. Starting fresh.", flush=True)
             start_round = 1
@@ -330,11 +345,15 @@ def evaluate_method_configuration(
         r_entry["round"] = r
         r_entry["elapsed_sec"] = float(time.perf_counter() - t_p1_start)
 
-        # Save periodic checkpoint to disk / Google Drive
+        # Save periodic checkpoint to disk / Google Drive with full architecture metadata
         if r % log_interval == 0 or r == rounds:
             torch.save({
                 "round": r,
                 "model_state_dict": server.global_model.state_dict(),
+                "in_features": config.model.in_features,
+                "num_classes": num_known,
+                "dataset_name": target_ds_name,
+                "beta_dirichlet": beta_dirichlet,
             }, latest_ckpt)
 
         if r == 1 or r % log_interval == 0 or r == rounds:

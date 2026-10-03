@@ -2,7 +2,7 @@ dataset_name: "b_nat"
 data_dir: "data/raw"
 csv_filename: "b_nat.csv"
 target_column: "label"
-in_features: 21
+in_features: 31
 num_classes_total: 5
 known_classes: [0, 1, 2, 3]
 unknown_classes: [4]

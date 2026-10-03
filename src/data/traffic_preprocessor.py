@@ -27,6 +27,7 @@ class PreprocessingRecipe:
     categorical_cols: List[str]
     financial_wei_cols: List[str] = field(default_factory=list)
     one_hot: bool = True
+    fixed_vocabularies: Dict[str, List[str]] = field(default_factory=dict)
 
 
 DATASET_RECIPES: Dict[str, PreprocessingRecipe] = {
@@ -57,6 +58,11 @@ DATASET_RECIPES: Dict[str, PreprocessingRecipe] = {
         ],
         categorical_cols=["protocol_type", "service", "flag"],
         one_hot=True,
+        fixed_vocabularies={
+            "protocol_type": ["icmp", "tcp", "udp"],
+            "service": ["http", "netbios_ssn", "oth_i", "other", "private"],
+            "flag": ["OTH", "RSTR", "S1", "S3", "SF"],
+        },
     ),
     "b_tat": PreprocessingRecipe(
         dataset_name="b_tat",
@@ -137,9 +143,11 @@ class ZeroLeakageTrafficPreprocessor:
                 self.skewed_means[col] = float(np.mean(vals))
                 self.skewed_stds[col] = float(np.std(vals)) + 1e-7
 
-        # 3. Categoricals: Extract vocabulary exclusively from D_train
+        # 3. Categoricals: Use fixed domain vocabulary if defined, else extract from D_train
         for col in self.recipe.categorical_cols:
-            if col in train_df.columns:
+            if col in self.recipe.fixed_vocabularies:
+                self.vocabularies[col] = list(self.recipe.fixed_vocabularies[col])
+            elif col in train_df.columns:
                 cats = sorted(train_df[col].astype(str).str.strip().unique().tolist())
                 self.vocabularies[col] = cats
 

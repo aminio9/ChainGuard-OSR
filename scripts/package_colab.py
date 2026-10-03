@@ -1427,6 +1427,15 @@ def main() -> None:
     code_zip = create_code_zip()
     data_zip = create_data_zip()
 
+    temo_dir = PROJECT_ROOT.parent / "temo"
+    if temo_dir.is_dir():
+        print(f"[*] Synchronizing deployment artifacts to {temo_dir} ...")
+        shutil.copy2(code_zip, temo_dir / "fedtros_code.zip")
+        shutil.copy2(colab_nb, temo_dir / "FedTROS_Colab_Runner.ipynb")
+        shutil.copy2(drive_nb, temo_dir / "FedTROS_Colab_Drive_Runner.ipynb")
+        shutil.copy2(sh_script, temo_dir / "setup_colab.sh")
+        print(f"[OK] {temo_dir} synchronized successfully.")
+
     print("=" * 70)
     print("[SUCCESS] All deployment artifacts generated in deploy/:")
     print(f"  1. Code ZIP:          {code_zip} ({code_zip.stat().st_size / (1024**2):.2f} MB)")
@@ -1439,3 +1448,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

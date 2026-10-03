@@ -10,7 +10,7 @@ experiment:
 data:
   dataset_name: "b_nat"
   data_dir: "data/raw"
-  in_features: 21
+  in_features: 31
   num_classes_total: 5
   known_classes: [0, 1, 2, 3]          # Normal, BP, DoS, MitM
   unknown_classes: [4]                 # FoT (Zero-day unknown attack)
@@ -32,7 +32,7 @@ federated:
 
 model:
   architecture: "vib_network"
-  in_features: 21
+  in_features: 31
   latent_dim: 64                       # d_z = 64 bottleneck dimension
   hidden_dim: [512, 256, 128]          # MLP backbone: 512 -> 256 -> 128 (Section 5.3)
   dropout: 0.1
