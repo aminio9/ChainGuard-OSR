@@ -67,7 +67,8 @@ venv.bak/
 *.swo
 
 # Project specific: large data, checkpoints, raw logs
-data/
+/data/
+!src/data/
 *.csv
 checkpoints/*.pt
 checkpoints/*.pth
