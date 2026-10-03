@@ -1023,7 +1023,7 @@ print(f"CUDA Available:  {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"Active GPU:      {torch.cuda.get_device_name(0)}")
     print(f"VRAM Total:      {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-    print("  -> [OK] GPU Acceleration Active! Expected speed: ~2-4 seconds per communication round.")
+    print("  -> [OK] GPU Acceleration Active! Expected speed: ~0.15-0.35 seconds per communication round.")
 else:
     print("  -> [WARNING] Running in CPU mode (~90-110s per round).")
     if IS_COLAB:
@@ -1228,7 +1228,7 @@ print(f"CUDA Available:  {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"Active GPU:      {torch.cuda.get_device_name(0)}")
     print(f"VRAM Total:      {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
-    print("  -> [OK] GPU Acceleration Active! Expected speed: ~2-4 seconds per communication round.")
+    print("  -> [OK] GPU Acceleration Active! Expected speed: ~0.15-0.35 seconds per communication round.")
 else:
     print("  -> [WARNING] Running in CPU mode (~90-110s per round).")
     if IS_COLAB:
