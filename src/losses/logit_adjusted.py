@@ -99,7 +99,7 @@ class LogitAdjustedBalancedLoss(nn.Module):
         Returns:
             Scalar balanced cross-entropy loss.
         """
-        priors = class_priors.to(logits.device).clamp(min=1e-12)
+        priors = class_priors.to(logits.device).clamp(min=1e-3)
         log_priors = torch.log(priors)
         adjusted_logits = logits + self.gamma * log_priors.unsqueeze(0)
         return F.cross_entropy(adjusted_logits, targets)
@@ -114,7 +114,7 @@ def logit_adjusted_balanced_loss(
 ) -> torch.Tensor:
     """Functional interface for Logit-Adjusted Balanced Loss (L_BLA)."""
     scale = float(gamma if gamma is not None else tau)
-    priors = class_priors.to(logits.device).clamp(min=1e-12)
+    priors = class_priors.to(logits.device).clamp(min=1e-3)
     log_priors = torch.log(priors)
     adjusted_logits = logits + scale * log_priors.unsqueeze(0)
     return F.cross_entropy(adjusted_logits, targets)

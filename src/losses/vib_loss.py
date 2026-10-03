@@ -15,7 +15,7 @@ from __future__ import annotations
 import torch
 
 
-def vib_kl_divergence_loss(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+def vib_kl_divergence_loss(mu: torch.Tensor, logvar: torch.Tensor, normalize_dim: bool = False) -> torch.Tensor:
     """Compute analytical KL Divergence between N(m_{theta_k}(x), diag(sigma_{theta_k}^2(x))) and N(0, I_{d_z}).
 
     Mathematical Formulation (Eq. eq:vib_kl):
@@ -26,9 +26,12 @@ def vib_kl_divergence_loss(mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tens
     Args:
         mu: Encoder posterior mean tensor m_{theta_k}(x) of shape (|B_k|, d_z).
         logvar: Encoder posterior log-variance tensor log(sigma_{theta_k}^2(x)) of shape (|B_k|, d_z).
+        normalize_dim: If True, normalizes KL divergence across latent dimension d_z.
 
     Returns:
         Scalar KL divergence loss averaged over the mini-batch B_k.
     """
     kl = -0.5 * torch.sum(1.0 + logvar - mu.pow(2) - torch.exp(logvar), dim=-1)
+    if normalize_dim and mu.size(-1) > 0:
+        kl = kl / float(mu.size(-1))
     return kl.mean()

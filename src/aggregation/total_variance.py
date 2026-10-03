@@ -38,7 +38,7 @@ def build_global_profile_from_moments(
     total_samples: int,
     mu: torch.Tensor,
     block_covs: List[torch.Tensor],
-    tikhonov_eps: float = 1e-5,
+    tikhonov_eps: float = 1e-3,
     conformal_threshold: float = 0.0,
 ) -> GlobalClassProfile:
     """Construct a GlobalClassProfile with symmetrized and regularized inverse block covariances."""
@@ -73,7 +73,7 @@ def aggregate_total_variance_moments(
     class_submissions: Dict[int, List[ClientClassMoment]],
     num_blocks: int = 4,
     block_dim: int = 16,
-    tikhonov_eps: float = 1e-5,
+    tikhonov_eps: float = 1e-3,
     apply_between_client_dispersion: bool = True,
     min_cov_samples: int = 3,
 ) -> Dict[int, GlobalClassProfile]:

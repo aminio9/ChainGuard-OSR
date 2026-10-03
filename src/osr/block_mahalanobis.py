@@ -292,21 +292,23 @@ class WireSpeedEdgeDetector:
         valid_tau = (thresholds > 0.0) & torch.isfinite(thresholds)
         safe_thresholds = torch.where(valid_tau, thresholds, torch.ones_like(thresholds))
         norm_dist_matrix = dist_matrix / safe_thresholds.unsqueeze(0)
-        best_indices = torch.argmin(norm_dist_matrix, dim=1)
+        best_raw_indices = torch.argmin(dist_matrix, dim=1)
+        best_norm_indices = torch.argmin(norm_dist_matrix, dim=1)
         accepted_mask = dist_matrix <= thresholds.unsqueeze(0)
 
         preds, is_unk_list, cand_list, norm_scores, raw_scores, tau_used, pred_sets = [], [], [], [], [], [], []
         for i in range(len(x)):
-            best_idx = int(best_indices[i].item())
-            cand_c = class_keys[best_idx]
+            best_raw_idx = int(best_raw_indices[i].item())
+            best_norm_idx = int(best_norm_indices[i].item())
+            cand_c = class_keys[best_norm_idx]
             pset = [class_keys[j] for j in range(len(class_keys)) if bool(accepted_mask[i, j].item())]
             is_unk = len(pset) == 0
             preds.append(self.unknown_label if is_unk else cand_c)
             is_unk_list.append(is_unk)
             cand_list.append(cand_c)
-            norm_scores.append(float(norm_dist_matrix[i, best_idx].item()))
-            raw_scores.append(float(dist_matrix[i, best_idx].item()))
-            tau_used.append(float(thresholds[best_idx].item()))
+            norm_scores.append(float(norm_dist_matrix[i, best_norm_idx].item()))
+            raw_scores.append(float(dist_matrix[i, best_raw_idx].item()))
+            tau_used.append(float(thresholds[best_norm_idx].item()))
             pred_sets.append(pset)
 
         return {

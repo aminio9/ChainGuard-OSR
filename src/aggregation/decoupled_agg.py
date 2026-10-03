@@ -88,7 +88,7 @@ def aggregate_decoupled_parameters(
                 new_weight[c] = weight_row
 
                 if has_bias and new_bias is not None:
-                    bias_val = torch.tensor(0.0, dtype=torch.float32)
+                    bias_val = torch.zeros_like(first_params[classifier_bias_key][c], dtype=torch.float32)
                     for params, cnt in reporting_clients:
                         w_k = float(cnt) / float(total_c_samples)
                         bias_val += params[classifier_bias_key][c].float() * w_k

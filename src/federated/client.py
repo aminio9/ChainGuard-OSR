@@ -193,16 +193,13 @@ class FederatedClient:
 
                 epoch_losses.append(breakdown)
 
-        # Baseline prototype calculation
-        prototypes_data = self._compute_local_prototypes()
-
         # Compute average metrics across all batches
         avg_metrics: Dict[str, float] = {}
         if epoch_losses:
             for k in epoch_losses[0].keys():
                 avg_metrics[k] = float(np.mean([entry[k] for entry in epoch_losses]))
 
-        return self.get_parameters(), prototypes_data, avg_metrics
+        return self.get_parameters(), {}, avg_metrics
 
     @torch.no_grad()
     def extract_phase_two_moments(
@@ -360,48 +357,6 @@ class FederatedClient:
             counts, edges = compute_right_closed_histogram(scores_t, bin_edges=bin_edges)
             histograms[int(c)] = (counts, edges)
         return histograms
-
-    @torch.no_grad()
-    def _compute_local_prototypes(
-        self,
-    ) -> Dict[int, Tuple[torch.Tensor, torch.Tensor, int]]:
-        """Compute empirical mean and covariance for local diagnostics."""
-        self.model.eval()
-        loader = DataLoader(self.dataset, batch_size=256, shuffle=False)
-        all_z = []
-        all_y = []
-
-        for x_batch, y_batch in loader:
-            x_b = x_batch.to(self.device)
-            mu = extract_latent_mu(self.model, x_b)
-            all_z.append(mu.cpu())
-            all_y.append(y_batch)
-
-        z_all = torch.cat(all_z, dim=0)
-        y_all = torch.cat(all_y, dim=0)
-
-        prototypes: Dict[int, Tuple[torch.Tensor, torch.Tensor, int]] = {}
-        latent_dim = z_all.size(1)
-
-        for c in self.local_classes:
-            c = int(c)
-            idx = (y_all == c)
-            count = int(idx.sum().item())
-            if count == 0:
-                continue
-
-            z_c = z_all[idx]
-            mu_c = torch.mean(z_c, dim=0)
-
-            if count > 1:
-                centered = z_c - mu_c
-                cov_c = torch.matmul(centered.t(), centered) / float(count - 1)
-            else:
-                cov_c = torch.eye(latent_dim)
-
-            prototypes[c] = (mu_c, cov_c, count)
-
-        return prototypes
 
     def receive_global_profiles(
         self,

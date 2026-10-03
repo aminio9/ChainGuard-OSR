@@ -11,6 +11,8 @@ Every baseline must strictly respect:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
+import time
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
@@ -116,7 +118,34 @@ class BaseBaseline(ABC):
     ) -> List[Dict[str, float]]:
         """Execute full multi-round federated training."""
         round_histories: List[Dict[str, float]] = []
-        for r in range(1, num_rounds + 1):
+        ckpt_dir_str = kwargs.get("checkpoint_dir", None)
+        target_model = getattr(self, "model", None) or getattr(self, "global_model", None)
+        latest_ckpt = None
+        start_round = 1
+
+        if ckpt_dir_str and target_model is not None:
+            ckpt_path_dir = Path(ckpt_dir_str)
+            ckpt_path_dir.mkdir(parents=True, exist_ok=True)
+            latest_ckpt = ckpt_path_dir / f"{self.name.lower().replace(' ', '_')}_checkpoint.pt"
+            if kwargs.get("resume", True) and latest_ckpt.exists():
+                try:
+                    saved_dict = torch.load(latest_ckpt, map_location=self.device, weights_only=False)
+                    target_model.load_state_dict(saved_dict["model_state_dict"])
+                    saved_r = saved_dict.get("round", 0)
+                    if saved_r < num_rounds:
+                        start_round = saved_r + 1
+                        print(f"    [{self.name}] Resuming from round {start_round}/{num_rounds} via {latest_ckpt}...", flush=True)
+                    else:
+                        print(f"    [{self.name}] Checkpoint already completed {saved_r}/{num_rounds} rounds. Skipping loop.", flush=True)
+                        start_round = num_rounds + 1
+                except Exception as e:
+                    print(f"    [{self.name}] Warning: Failed to load {latest_ckpt}: {e}. Starting fresh.", flush=True)
+                    start_round = 1
+
+        t_fit_start = time.perf_counter()
+        log_interval = max(1, num_rounds // 10) if num_rounds >= 20 else max(1, num_rounds // 5)
+        for r in range(start_round, num_rounds + 1):
+            t_r0 = time.perf_counter()
             stats = self.fit_round(
                 round_idx=r,
                 client_datasets=client_datasets,
@@ -126,6 +155,25 @@ class BaseBaseline(ABC):
                 **kwargs,
             )
             round_histories.append(stats)
+
+            if latest_ckpt and target_model is not None and (r % log_interval == 0 or r == num_rounds):
+                torch.save({
+                    "round": r,
+                    "model_state_dict": target_model.state_dict(),
+                }, latest_ckpt)
+
+            if r == 1 or r % log_interval == 0 or r == num_rounds:
+                elapsed = time.perf_counter() - t_fit_start
+                r_sec = time.perf_counter() - t_r0
+                rounds_done = r - start_round + 1
+                avg_sec = elapsed / max(rounds_done, 1)
+                eta_sec = avg_sec * (num_rounds - r)
+                loss_val = stats.get("train_loss", stats.get("loss", 0.0)) if isinstance(stats, dict) else 0.0
+                print(
+                    f"    [{self.name}] Round {r:3d}/{num_rounds} | Loss: {loss_val:.4f} | "
+                    f"Speed: {r_sec:.2f}s/rnd | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
+                    flush=True,
+                )
         self.is_fitted = True
         return round_histories
 

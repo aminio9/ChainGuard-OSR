@@ -45,7 +45,7 @@ class PartitionConfig(BaseModel):
 
 
 class FederatedConfig(BaseModel):
-    algorithm: str = "fedavg"
+    algorithm: str = "fedtros_mc"
     num_clients: int = 10
     client_fraction: float = 1.0
     num_rounds: int = 50
@@ -54,18 +54,17 @@ class FederatedConfig(BaseModel):
     primal_dual_rho: float = 0.0
     covariance_prototype_aggregation: bool = False
     share_classifier_head: bool = True
-    fedprox_mu: float = 0.0
     num_blocks: int = 4
     block_dim: int = 16
     min_cov_samples: int = 3
-    tikhonov_eps: float = 1e-4
+    tikhonov_eps: float = 1e-3
     aggregation_strategy: str = "decoupled"
     partition: PartitionConfig = Field(default_factory=PartitionConfig)
 
 
 class ModelConfig(BaseModel):
     architecture: str = "vib_network"
-    in_features: int = 34
+    in_features: int = 21
     latent_dim: int = 64
     hidden_dim: Union[int, List[int]] = Field(default_factory=lambda: [512, 256, 128])
     density_dim: int = 0
@@ -95,7 +94,6 @@ class LossConfig(BaseModel):
     focal_gamma: float = 2.0
     lambda_anchor: float = 0.0
     primal_dual_rho: float = 0.0
-    fedprox_mu: float = 0.0
     tau_g: float = 2.0
     max_lambda_anchor: float = 1.0
     anchor_kappa: float = 10.0
@@ -138,7 +136,12 @@ def load_config(config_path: str | Path, overrides: Optional[dict[str, Any]] = N
     """Load configuration from a YAML file, merging with default configurations."""
     path = Path(config_path)
     if not path.is_file():
-        raise FileNotFoundError(f"Configuration file not found: {path}")
+        root_dir = Path(__file__).resolve().parent.parent
+        alt_path = root_dir / config_path
+        if alt_path.is_file():
+            path = alt_path
+        else:
+            raise FileNotFoundError(f"Configuration file not found: {path}")
 
     # Determine project root and default config path
     root_dir = Path(__file__).resolve().parent.parent
@@ -176,12 +179,6 @@ def load_config(config_path: str | Path, overrides: Optional[dict[str, Any]] = N
                     sub_dict = yaml.safe_load(sf) or {}
                 raw_cfg.setdefault(target_section, {})
                 raw_cfg[target_section] = _deep_update(sub_dict, raw_cfg.get(target_section, {}))
-
-    # Synchronize fedprox_mu if algorithm is fedprox
-    if raw_cfg.get("federated", {}).get("algorithm") == "fedprox":
-        mu = raw_cfg["federated"].get("fedprox_mu", 0.01)
-        raw_cfg.setdefault("loss", {})
-        raw_cfg["loss"]["fedprox_mu"] = mu
 
     # Merge into base_dict
     final_dict = _deep_update(base_dict, raw_cfg)

@@ -220,3 +220,69 @@ def compute_osr_metrics(
         "open_set_macro_f1": float(np.mean(f1_list)),
     }
 
+
+def compute_confusion_matrix(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    labels: list[int] | None = None,
+) -> np.ndarray:
+    """Compute exact integer confusion matrix using pure NumPy."""
+    yt = np.asarray(y_true, dtype=np.int64)
+    yp = np.asarray(y_pred, dtype=np.int64)
+    if labels is None:
+        all_lbls = sorted(set(yt.tolist()) | set(yp.tolist()))
+    else:
+        all_lbls = list(labels)
+    lbl_to_idx = {int(lbl): idx for idx, lbl in enumerate(all_lbls)}
+    n = len(all_lbls)
+    cm = np.zeros((n, n), dtype=np.int64)
+    for t, p in zip(yt, yp):
+        ti = lbl_to_idx.get(int(t))
+        pi = lbl_to_idx.get(int(p))
+        if ti is not None and pi is not None:
+            cm[ti, pi] += 1
+    return cm
+
+
+def compute_roc_curve_points(
+    y_binary: np.ndarray,
+    anomaly_scores: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (fpr, tpr) arrays for ROC curve plotting in pure NumPy."""
+    yb = np.asarray(y_binary, dtype=int)
+    sc = np.asarray(anomaly_scores, dtype=float)
+    n_pos = int(np.sum(yb == 1))
+    n_neg = int(np.sum(yb == 0))
+    if n_pos == 0 or n_neg == 0:
+        return np.array([0.0, 1.0]), np.array([0.0, 1.0])
+    order = np.argsort(sc)[::-1]
+    y_sorted = yb[order]
+    tps = np.cumsum(y_sorted == 1)
+    fps = np.cumsum(y_sorted == 0)
+    tpr = np.concatenate([[0.0], tps / float(n_pos), [1.0]])
+    fpr = np.concatenate([[0.0], fps / float(n_neg), [1.0]])
+    return fpr, tpr
+
+
+def compute_pr_curve_points(
+    y_binary: np.ndarray,
+    anomaly_scores: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return (precision, recall) arrays for PR curve plotting in pure NumPy."""
+    yb = np.asarray(y_binary, dtype=int)
+    sc = np.asarray(anomaly_scores, dtype=float)
+    n_pos = int(np.sum(yb == 1))
+    if n_pos == 0:
+        return np.array([1.0, 0.0]), np.array([0.0, 1.0])
+    order = np.argsort(sc)[::-1]
+    y_sorted = yb[order]
+    tps = np.cumsum(y_sorted == 1)
+    fps = np.cumsum(y_sorted == 0)
+    prec = tps / np.maximum(tps + fps, 1)
+    rec = tps / float(n_pos)
+    first_p = float(prec[0]) if len(prec) > 0 else 1.0
+    precisions = np.concatenate([[first_p], prec])
+    recalls = np.concatenate([[0.0], rec])
+    return precisions, recalls
+
+

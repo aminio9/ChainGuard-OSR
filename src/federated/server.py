@@ -11,7 +11,6 @@ import torch.nn as nn
 
 from src.models.vib_network import VIBClassifierNetwork
 from src.federated.client import FederatedClient, extract_latent_mu
-from src.aggregation.fedavg_agg import aggregate_fedavg_parameters
 from src.aggregation.decoupled_agg import aggregate_decoupled_parameters
 from src.aggregation.total_variance import (
     ClientClassMoment,
@@ -127,17 +126,13 @@ class FederatedServer:
             client_updates.append((updated_params, len(client.dataset), client.samples_per_class))
             round_losses.append(loss_metrics)
 
-        # Parameter Aggregation (LaTeX Section 4.3)
-        if self.aggregation_strategy == "fedavg":
-            fedavg_updates = [(params, n) for params, n, _ in client_updates]
-            new_global_w = aggregate_fedavg_parameters(fedavg_updates)
-        else:
-            # Decoupled Server Aggregation: average encoder theta over all K nodes,
-            # and average each class head psi_c over active nodes K_c = {k in M : N_{k,c} > 0}
-            new_global_w = aggregate_decoupled_parameters(
-                client_updates,
-                previous_global_state=current_global_w,
-            )
+        # Decoupled Server Aggregation (LaTeX Algorithm 1 Line 55-56 & Eq. 78):
+        # Average encoder theta over all K nodes, and average each class head psi_c
+        # over active nodes K_c = {k in M : N_{k,c} > 0}.
+        new_global_w = aggregate_decoupled_parameters(
+            client_updates,
+            previous_global_state=current_global_w,
+        )
         self.global_model.load_state_dict(new_global_w)
         self.global_params = new_global_w
         self.global_encoder_params = self.global_model.get_encoder_parameters()
@@ -256,13 +251,25 @@ class FederatedServer:
                 class_dists = compute_block_mahalanobis_distances(
                     cal_z_all, self.global_profiles, num_blocks=num_blocks, block_dim=block_dim
                 )
+                import scipy.stats as stats
+                fallback_chi2_tau = float(stats.chi2.ppf(1.0 - alpha, df=num_blocks * block_dim))
+                all_true_dists = [
+                    class_dists[c][cal_y_all == c]
+                    for c in class_keys
+                    if int((cal_y_all == c).sum().item()) > 0
+                ]
+                global_fallback_tau = (
+                    float(compute_finite_sample_quantile(torch.cat(all_true_dists, dim=0), alpha=alpha))
+                    if all_true_dists
+                    else fallback_chi2_tau
+                )
                 for c in class_keys:
                     true_mask = (cal_y_all == c)
                     n_cal_c = int(true_mask.sum().item())
                     new_tau = (
                         float(compute_finite_sample_quantile(class_dists[c][true_mask], alpha=alpha))
                         if n_cal_c > 0
-                        else float("inf")
+                        else global_fallback_tau
                     )
                     self.global_profiles[c] = self.global_profiles[c]._replace(conformal_threshold=new_tau)
                     self.calibration_counts[int(c)] = n_cal_c
@@ -307,6 +314,8 @@ class FederatedServer:
                         finally:
                             c_node.cal_dataset = orig_cal
 
+                import scipy.stats as stats
+                fallback_chi2_tau = float(stats.chi2.ppf(1.0 - alpha, df=num_blocks * block_dim))
                 num_bins = 2048
                 for c in class_keys:
                     c_arrays = client_scores_per_class[c]
@@ -320,7 +329,7 @@ class FederatedServer:
                         ]
                         new_tau = float(aggregate_distributed_cdfs(client_hists, alpha=alpha))
                     else:
-                        new_tau = float("inf")
+                        new_tau = fallback_chi2_tau
 
                     self.global_profiles[c] = self.global_profiles[c]._replace(conformal_threshold=new_tau)
                     self.calibration_counts[int(c)] = n_cal_c
@@ -328,7 +337,7 @@ class FederatedServer:
         elif not enable_conformal:
             import scipy.stats as stats
             total_dim = num_blocks * block_dim
-            theoretical_tau = float(np.sqrt(stats.chi2.ppf(1.0 - alpha, df=total_dim)))
+            theoretical_tau = float(stats.chi2.ppf(1.0 - alpha, df=total_dim))
             self.calibration_counts = {}
             self.calibration_thresholds = {}
             for c in self.global_profiles.keys():
