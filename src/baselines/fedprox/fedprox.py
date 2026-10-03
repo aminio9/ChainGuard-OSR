@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 from src.baselines.base import BaseBaseline, create_baseline_optimizer
 from src.baselines.fedavg.fedavg import FedAvgModel
-from src.data.base import FlowDataset
+from src.data.base import FlowDataset, FastBatchSampler
 
 
 class FedProxBaseline(BaseBaseline):
@@ -84,18 +84,13 @@ class FedProxBaseline(BaseBaseline):
             local_model.load_state_dict(global_state)
             local_model.train()
             optimizer = create_baseline_optimizer(local_model, lr=lr, optimizer_name=kwargs.get("optimizer_name", "adam"))
-            loader = DataLoader(c_data, batch_size=batch_size, shuffle=True, drop_last=(len(c_data) > batch_size))
+            sampler = FastBatchSampler(c_data, self.device)
 
             client_running_loss = torch.tensor(0.0, device=self.device)
             steps = 0
             for _ in range(epochs):
-                for x_b, y_b in loader:
-                    if x_b.size(0) <= 1:
-                        continue
-                    x_b = x_b.to(self.device)
-                    y_b = y_b.to(self.device)
-
-                    optimizer.zero_grad()
+                for x_b, y_b in sampler.iter_batches(batch_size=batch_size, shuffle=True, drop_last=(len(c_data) > batch_size)):
+                    optimizer.zero_grad(set_to_none=True)
                     logits, _ = local_model(x_b)
                     loss_ce = criterion(logits, y_b)
 

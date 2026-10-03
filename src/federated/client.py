@@ -106,6 +106,20 @@ class FederatedClient:
             device=self.device,
         )
 
+        # In-VRAM / In-Device direct tensor caching for zero-PCIe training and moment extraction
+        self.features_dev = self.dataset.features.to(self.device, non_blocking=True)
+        self.labels_dev = self.dataset.labels.to(self.device, non_blocking=True)
+        self.num_samples = self.features_dev.size(0)
+
+        if self.cal_dataset is not None and len(self.cal_dataset) > 0:
+            self.cal_features_dev = self.cal_dataset.features.to(self.device, non_blocking=True)
+            self.cal_labels_dev = self.cal_dataset.labels.to(self.device, non_blocking=True)
+            self.num_cal_samples = self.cal_features_dev.size(0)
+        else:
+            self.cal_features_dev = None
+            self.cal_labels_dev = None
+            self.num_cal_samples = 0
+
     def set_learning_rate(self, lr: float) -> None:
         """Update optimizer learning rate according to Cosine Annealing (LaTeX Equation 93)."""
         for param_group in self.optimizer.param_groups:
@@ -162,20 +176,27 @@ class FederatedClient:
         epochs = epochs or self.config.federated.local_epochs
         batch_size = batch_size or self.config.federated.batch_size
 
-        drop_last = len(self.dataset) > batch_size
-        loader = DataLoader(self.dataset, batch_size=batch_size, shuffle=True, drop_last=drop_last)
+        num_samples = self.num_samples
+        if num_samples == 0:
+            return self.get_parameters(), {}, {}
+
+        drop_last = num_samples > batch_size
         running_totals = torch.zeros(3, device=self.device)
         total_batches = 0
+        end_limit = num_samples - (batch_size if drop_last else 0) + 1
 
         for _ in range(epochs):
-            for x_batch, y_batch in loader:
-                if x_batch.size(0) <= 1:
+            perm = torch.randperm(num_samples, device=self.device)
+            feats = self.features_dev[perm]
+            labs = self.labels_dev[perm]
+
+            for i in range(0, end_limit, batch_size):
+                x_b = feats[i : i + batch_size]
+                y_b = labs[i : i + batch_size]
+                if x_b.size(0) <= 1:
                     continue  # BatchNorm/LayerNorm stability
 
-                x_b = x_batch.to(self.device)
-                y_b = y_batch.to(self.device)
-
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
 
                 logits, z, mu, logvar = self.model(x_b)
 
@@ -233,18 +254,16 @@ class FederatedClient:
         """
         frozen_encoder.eval()
         n_min = min_cov_samples if min_cov_samples is not None else getattr(self.config.federated, "min_cov_samples", 3)
-        loader = DataLoader(self.dataset, batch_size=256, shuffle=False)
+        
         all_z = []
-        all_y = []
-
-        for x_b, y_b in loader:
-            x_dev = x_b.to(self.device)
-            mu_z = extract_latent_mu(frozen_encoder, x_dev)
+        chunk_size = 4096
+        for i in range(0, self.num_samples, chunk_size):
+            x_chunk = self.features_dev[i : i + chunk_size]
+            mu_z = extract_latent_mu(frozen_encoder, x_chunk)
             all_z.append(mu_z)
-            all_y.append(y_b.to(self.device))
 
-        z_all = torch.cat(all_z, dim=0)
-        y_all = torch.cat(all_y, dim=0)
+        z_all = torch.cat(all_z, dim=0) if all_z else torch.empty((0, self.config.model.latent_dim), device=self.device)
+        y_all = self.labels_dev
 
         actual_latent = z_all.size(1)
         if num_blocks * block_dim != actual_latent:
@@ -311,22 +330,19 @@ class FederatedClient:
         """
         from src.osr.block_mahalanobis import compute_block_mahalanobis_distances
 
-        cal_ds = self.cal_dataset if (self.cal_dataset is not None and len(self.cal_dataset) > 0) else None
-        if cal_ds is None:
+        if self.cal_features_dev is None or self.num_cal_samples == 0:
             return {}
 
         frozen_encoder.eval()
-        loader = DataLoader(cal_ds, batch_size=256, shuffle=False)
+        chunk_size = 4096
         all_cal_z = []
-        all_cal_y = []
-        for cx, cy in loader:
-            cx_dev = cx.to(self.device)
-            c_mu = extract_latent_mu(frozen_encoder, cx_dev)
+        for i in range(0, self.num_cal_samples, chunk_size):
+            cx = self.cal_features_dev[i : i + chunk_size]
+            c_mu = extract_latent_mu(frozen_encoder, cx)
             all_cal_z.append(c_mu)
-            all_cal_y.append(cy.to(self.device))
 
-        cal_z_all = torch.cat(all_cal_z, dim=0)
-        cal_y_all = torch.cat(all_cal_y, dim=0)
+        cal_z_all = torch.cat(all_cal_z, dim=0) if all_cal_z else torch.empty((0, self.config.model.latent_dim), device=self.device)
+        cal_y_all = self.cal_labels_dev
 
         class_dists = compute_block_mahalanobis_distances(
             cal_z_all,

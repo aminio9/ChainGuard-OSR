@@ -62,3 +62,45 @@ class FlowDataset(Dataset):
     @property
     def unique_classes(self) -> torch.Tensor:
         return torch.unique(self.labels)
+
+
+class FastBatchSampler:
+    """High-throughput In-Device mini-batch generator.
+    
+    Eliminates PyTorch DataLoader CPU iteration overhead and per-batch PCIe bus transfers
+    by maintaining contiguous feature/label buffers directly on target hardware (GPU VRAM or CPU).
+    """
+
+    def __init__(self, dataset: FlowDataset, device: torch.device):
+        self.device = device
+        # Cache device tensors directly on the dataset to avoid per-round re-allocation
+        dev_cache = getattr(dataset, "_device_cache", None)
+        if dev_cache is None or dev_cache[0].device != device:
+            dev_feats = dataset.features.to(device, non_blocking=True)
+            dev_labs = dataset.labels.to(device, non_blocking=True)
+            dataset._device_cache = (dev_feats, dev_labs)
+
+        self.features, self.labels = dataset._device_cache
+        self.num_samples = self.features.size(0)
+
+    def iter_batches(self, batch_size: int, shuffle: bool = True, drop_last: bool = False):
+        if self.num_samples == 0:
+            return
+
+        drop = drop_last and (self.num_samples > batch_size)
+        end_limit = self.num_samples - (batch_size if drop else 0) + 1
+
+        if shuffle:
+            perm = torch.randperm(self.num_samples, device=self.device)
+            feats = self.features[perm]
+            labs = self.labels[perm]
+        else:
+            feats = self.features
+            labs = self.labels
+
+        for i in range(0, end_limit, batch_size):
+            bx = feats[i : i + batch_size]
+            by = labs[i : i + batch_size]
+            if bx.size(0) <= 1:
+                continue
+            yield bx, by

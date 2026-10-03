@@ -148,7 +148,7 @@ class BaseBaseline(ABC):
                     start_round = 1
 
         t_fit_start = time.perf_counter()
-        log_interval = max(1, num_rounds // 10) if num_rounds >= 20 else max(1, num_rounds // 5)
+        log_interval = 1 if num_rounds <= 30 else max(1, num_rounds // 20)
         for r in range(start_round, num_rounds + 1):
             t_r0 = time.perf_counter()
             stats = self.fit_round(
@@ -174,9 +174,10 @@ class BaseBaseline(ABC):
                 avg_sec = elapsed / max(rounds_done, 1)
                 eta_sec = avg_sec * (num_rounds - r)
                 loss_val = stats.get("train_loss", stats.get("loss", 0.0)) if isinstance(stats, dict) else 0.0
+                vram_str = f" | VRAM: {torch.cuda.memory_allocated(self.device)/(1024**2):.0f}MB" if self.device.type == "cuda" else ""
                 print(
                     f"    [{self.name}] Round {r:3d}/{num_rounds} | Loss: {loss_val:.4f} | "
-                    f"Speed: {r_sec:.2f}s/rnd | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
+                    f"Speed: {r_sec:.2f}s/rnd{vram_str} | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
                     flush=True,
                 )
         self.is_fitted = True

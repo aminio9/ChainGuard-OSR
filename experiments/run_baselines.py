@@ -133,6 +133,27 @@ def evaluate_method_configuration(
     set_seed(config.experiment.seed)
     device = get_device(config.experiment.device)
 
+    if device.type == "cuda":
+        vram_total = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+        vram_used = torch.cuda.memory_allocated(device) / (1024**3)
+        dev_name = torch.cuda.get_device_name(device)
+        print(
+            f"\n  +----------------------------------------------------------------------+\n"
+            f"  | [HARDWARE ACCELERATION] Device: GPU CUDA ({dev_name})\n"
+            f"  | VRAM Total: {vram_total:.2f} GB | VRAM Allocated: {vram_used:.2f} GB\n"
+            f"  | In-VRAM Zero-PCIe Slicing & Direct Tensor Buffering: ENABLED\n"
+            f"  +----------------------------------------------------------------------+\n",
+            flush=True,
+        )
+    else:
+        print(
+            f"\n  +----------------------------------------------------------------------+\n"
+            f"  | [HARDWARE ACCELERATION] Device: CPU (Warning: GPU not active)\n"
+            f"  | In-RAM Contiguous Slicing: ENABLED\n"
+            f"  +----------------------------------------------------------------------+\n",
+            flush=True,
+        )
+
     # 1. Prepare Data
     target_ds_name = config.data.dataset_name.lower().replace("-", "_")
     spc = samples_per_class if samples_per_class is not None else getattr(config.data, "samples_per_class", None)
@@ -332,7 +353,7 @@ def evaluate_method_configuration(
             start_round = 1
 
     t_p1_start = time.perf_counter()
-    log_interval = max(1, rounds // 10) if rounds >= 20 else max(1, rounds // 5)
+    log_interval = 1 if rounds <= 30 else max(1, rounds // 20)
     test_closed_x = test_closed_ds.features.to(device)
     test_closed_y = test_closed_ds.labels.numpy()
     round_history: List[Dict[str, Any]] = []
@@ -368,9 +389,10 @@ def evaluate_method_configuration(
             avg_sec = elapsed / max(rounds_done, 1)
             eta_sec = avg_sec * (rounds - r)
             loss_val = r_entry.get("train_loss", r_entry.get("loss_bla", 0.0))
+            vram_str = f" | VRAM: {torch.cuda.memory_allocated(device)/(1024**2):.0f}MB" if device.type == "cuda" else ""
             print(
                 f"    [FedTROS-MC] Round {r:3d}/{rounds} | Loss: {loss_val:.4f} | Val Acc: {c_acc * 100:.2f}% | "
-                f"Speed: {r_sec:.2f}s/rnd | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
+                f"Speed: {r_sec:.2f}s/rnd{vram_str} | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
                 flush=True,
             )
         round_history.append(r_entry)
