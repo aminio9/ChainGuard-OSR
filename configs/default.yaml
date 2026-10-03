@@ -8,12 +8,12 @@ experiment:
   save_frequency: 10
 
 data:
-  dataset_name: "b_nat" # "b_tat", "b_nat", or "synthetic_p2p"
-  data_dir: "data"
-  in_features: 34
-  num_classes_total: 10
-  known_classes: [0, 1, 2, 3]          # Known attack classes
-  unknown_classes: [4, 5]              # Zero-day unknown classes
+  dataset_name: "b_nat"
+  data_dir: "data/raw"
+  in_features: 21
+  num_classes_total: 5
+  known_classes: [0, 1, 2, 3]          # Normal, BP, DoS, MitM
+  unknown_classes: [4]                 # FoT (Zero-day unknown attack)
   test_split_ratio: 0.2
   cal_split_ratio: 0.1                 # Calibration set for Conformal Prediction
 
@@ -25,14 +25,14 @@ federated:
   batch_size: 64                       # B_s = 64 mini-batch size (Section 5.3)
   num_blocks: 4                        # B = 4 diagonal sub-blocks (Section 4.3)
   block_dim: 16                        # d_b = 16 sub-block dimension (64 = 4 * 16)
-  tikhonov_eps: 0.0001                 # Tikhonov stabilizer epsilon_v = 1e-4
+  tikhonov_eps: 0.001                  # Tikhonov stabilizer epsilon_v = 1e-3
   partition:
     strategy: "iid"                    # "iid" or "dirichlet"
     beta_dirichlet: 0.5                # Non-IID Dirichlet parameter
 
 model:
   architecture: "vib_network"
-  in_features: 34
+  in_features: 21
   latent_dim: 64                       # d_z = 64 bottleneck dimension
   hidden_dim: [512, 256, 128]          # MLP backbone: 512 -> 256 -> 128 (Section 5.3)
   dropout: 0.1

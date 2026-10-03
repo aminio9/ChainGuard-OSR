@@ -70,13 +70,13 @@ venv.bak/
 /data/
 !src/data/
 *.csv
-checkpoints/*.pt
-checkpoints/*.pth
-checkpoints/*.ckpt
+checkpoints/*
 !checkpoints/.gitkeep
 results/*
 !results/.gitkeep
+deploy/
 scratch/
+scratch_*
 *.log
 *.tar.gz
 *.zip

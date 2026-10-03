@@ -1,0 +1,14 @@
+dataset_name: "cic_ids2017"
+data_dir: "data/raw"
+csv_filename: "cic_ids2017.csv"
+target_column: "Label"
+in_features: 78
+num_classes_total: 11
+known_classes: [0, 1, 2, 3, 4, 5, 6, 7]
+unknown_classes: [8, 9, 10]
+known_class_names: ["BENIGN", "DDoS", "DoS Hulk", "PortScan", "DoS GoldenEye", "FTP-Patator", "SSH-Patator", "DoS Slowhttptest"]
+unknown_class_names: ["Bot", "Web Attack-Brute Force", "Web Attack-XSS"]
+test_split_ratio: 0.2
+cal_split_ratio: 0.1
+normalize: true
+normalization_type: "zscore"
