@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fl-osr"
+name = "chainguard-osr"
 version = "0.1.0"
-description = "Research Framework for Federated Open-Set Recognition and Conformal Defense in Decentralized Networks"
+description = "ChainGuard-OSR: Federated Open-Set Recognition and Conformal Defense for Blockchain Network Traffic"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [

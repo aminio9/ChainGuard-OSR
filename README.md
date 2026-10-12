@@ -1,10 +1,10 @@
-# FedTROS: Federated Open-Set Recognition for Blockchain Network Traffic under Non-IID Distributions
+# ChainGuard-OSR: Federated Open-Set Recognition for Blockchain Network Traffic under Non-IID Distributions
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 [![Testing: pytest](https://img.shields.io/badge/testing-pytest-green.svg)](https://docs.pytest.org/)
-[![Colab: Ready](https://img.shields.io/badge/Colab-Ready-orange.svg)](FedTROS_Colab_Runner.ipynb)
+[![Colab: Ready](https://img.shields.io/badge/Colab-Ready-orange.svg)](ChainGuard_OSR_Colab_Runner.ipynb)
 
 A modular, reproducible, and mathematically rigorous framework for **Federated Open-Set Recognition (OSR)** in decentralized peer-to-peer (P2P) blockchain networks under extreme label heterogeneity (Dirichlet non-IID skew).
 
@@ -16,7 +16,7 @@ In decentralized blockchain architectures, validating nodes are subject to both 
 1. **Gradient Distortion & Client Drift**: Local optimization without absent-class supervision pushes client representations into disjoint subspaces, leading to catastrophic dimensional collapse.
 2. **Uncalibrated Open-Set Rejection**: Heuristic thresholding on softmax scores or unregularized distance metrics produces uncontrollable false alarm rates (FAR) on legitimate traffic.
 
-**FedTROS** addresses these challenges via a 4-stage coordinated framework:
+**ChainGuard-OSR** addresses these challenges via a 4-stage coordinated framework:
 * **Variational Information Bottleneck (VIB)**: Enforces latent feature compression toward a standard Gaussian prior ($\mathcal{N}(\mathbf{0}, \mathbf{I})$), filtering high-frequency flow noise while preserving unconstrained Euclidean geometry.
 * **Balanced Logit Adjustment (BLA)**: Compensates for local class absence using smoothed Laplace priors, expanding decision margins for underrepresented categories.
 * **Federated Class Profiling via Law of Total Variance**: Deconstructs global class covariance into mean-within-client and between-client dispersion, regularized via Oracle Approximating Shrinkage (OAS) and block-diagonal factorization.
@@ -32,7 +32,7 @@ In decentralized blockchain architectures, validating nodes are subject to both 
 ├── LICENSE                      # MIT Open Source License
 ├── pyproject.toml               # Modern packaging specification (Hatchling / UV)
 ├── README.md                    # Framework documentation and replication guide
-├── FedTROS_Colab_Runner.ipynb   # Interactive end-to-end Google Colab runner
+├── ChainGuard_OSR_Colab_Runner.ipynb # Interactive end-to-end Google Colab runner
 ├── configs/                     # Declarative YAML experiment configurations
 │   ├── default.yaml             # Master benchmark configuration
 │   ├── datasets/                # Dataset definitions (B-TAT, B-NAT, Synthetic)

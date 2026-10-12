@@ -58,22 +58,28 @@ else
 fi
 
 echo "=== [2/5] Extracting Codebase ==="
-if [ -f "fedtros_code.zip" ]; then
-    unzip -q -o fedtros_code.zip
-    echo "  -> Code extracted successfully."
-else
-    echo "  -> fedtros_code.zip not found in current directory, skipping code extraction."
-fi
+for czip in "chainguard_code.zip" "chainguard_osr_code.zip" "fedtros_code.zip"; do
+    if [ -f "$czip" ]; then
+        unzip -q -o "$czip"
+        echo "  -> Code extracted successfully from $czip."
+        break
+    fi
+done
 
 echo "=== [3/5] Extracting Datasets ==="
 mkdir -p data/raw
 for dzip in \
+    /content/drive/MyDrive/ChainGuard-OSR/chainguard_data_all4.zip \
+    /content/drive/MyDrive/ChainGuard-OSR/chainguard_data_bnat.zip \
+    /content/drive/MyDrive/ChainGuard-OSR/fedtros_data_all4.zip \
+    /content/drive/MyDrive/ChainGuard-OSR/fedtros_data_bnat.zip \
     /content/drive/MyDrive/FedTROS/fedtros_data_all4.zip \
     /content/drive/MyDrive/fedtros_data_all4.zip \
     /content/drive/MyDrive/FedTROS/fedtros_data_bnat.zip \
     /content/drive/MyDrive/fedtros_data_bnat.zip \
     /content/fedtros_data_all4.zip \
     /content/fedtros_data_bnat.zip \
+    chainguard_data_*.zip \
     fedtros_data_all4.zip \
     fedtros_data_*.zip; do
     if [ -f "$dzip" ]; then

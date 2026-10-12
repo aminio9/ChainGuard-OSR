@@ -13,6 +13,8 @@ from matplotlib.colors import LinearSegmentedColormap
 
 COLORS = {
     "Proposed": "#7B1FA2",
+    "ChainGuard-OSR": "#7B1FA2",
+    "ChainGuard": "#7B1FA2",
     "FedTROS-MC": "#7B1FA2",
     "FedTROS": "#7B1FA2",
     "FedAvg": "#1976D2",
@@ -54,7 +56,16 @@ METHOD_STYLES = {
         "marker": "o",
         "linestyle": "-",
         "hatch": "///",
-        "label": "FedTROS-MC (Proposed)",
+        "label": "ChainGuard-OSR (Proposed)",
+        "linewidth": 2.4,
+        "markersize": 7.5,
+    },
+    "ChainGuard-OSR": {
+        "color": "#7B1FA2",
+        "marker": "o",
+        "linestyle": "-",
+        "hatch": "///",
+        "label": "ChainGuard-OSR (Proposed)",
         "linewidth": 2.4,
         "markersize": 7.5,
     },
