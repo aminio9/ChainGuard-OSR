@@ -77,19 +77,6 @@ pytest tests/ -v
 
 An interactive, GPU-accelerated notebook is available at [ChainGuard_OSR_Colab_Runner.ipynb](ChainGuard_OSR_Colab_Runner.ipynb).
 
----
-
-## Citation
-
-```bibtex
-@article{amini2026chainguard,
-  title={Federated Open-Set Recognition for Blockchain Network Traffic under Non-IID Distributions},
-  author={Amini, Mohammad Hassan and Entezari-Maleki, Reza},
-  journal={Computer Networks},
-  year={2026}
-}
-```
-
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
