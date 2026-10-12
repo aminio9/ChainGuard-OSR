@@ -9,7 +9,7 @@ description = "ChainGuard-OSR: Federated Open-Set Recognition and Conformal Defe
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-    { name = "Research Team", email = "research@example.com" },
+    { name = "Mohammad Hassan Amini", email = "aminimohammadhasan7@gmail.com" },
 ]
 license = { text = "MIT" }
 keywords = [
