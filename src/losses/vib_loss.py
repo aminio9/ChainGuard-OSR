@@ -15,7 +15,7 @@ from __future__ import annotations
 import torch
 
 
-def vib_kl_divergence_loss(mu: torch.Tensor, logvar: torch.Tensor, normalize_dim: bool = False) -> torch.Tensor:
+def vib_kl_divergence_loss(mu: torch.Tensor, logvar: torch.Tensor, normalize_dim: bool = True) -> torch.Tensor:
     """Compute analytical KL Divergence between N(m_{theta_k}(x), diag(sigma_{theta_k}^2(x))) and N(0, I_{d_z}).
 
     Mathematical Formulation (Eq. eq:vib_kl):

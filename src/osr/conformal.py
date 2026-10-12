@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, NamedTuple
 import numpy as np
 import torch
 
@@ -254,3 +254,180 @@ class MondrianConformalCalibrator:
             prediction_sets.append(pset)
 
         return prediction_sets
+
+
+def evaluate_conformal_sensitivity_sweep(
+    cal_scores_per_class: Dict[int, np.ndarray | torch.Tensor],
+    test_dist_matrix: np.ndarray | torch.Tensor,
+    test_labels: np.ndarray | torch.Tensor,
+    num_known_classes: int,
+    alphas: Optional[List[float]] = None,
+) -> List[Dict[str, Any]]:
+    """Evaluate empirical coverage, KFR, and zero-day recall across multiple conformal significance levels alpha.
+
+    Mathematical Formulation (LaTeX Section 4.4 & Section 5.4 Sensitivity Sweep):
+        r_{alpha, c} = ceil((N_{cal, c} + 1)(1 - alpha))
+        tau_{alpha, c} = S_{(r_{alpha, c})}
+        C_{1-alpha}(x) = { c in Y_K : D(z, c) <= tau_{alpha, c} }
+        hat{y}(x) = Unknown  iff  C_{1-alpha}(x) == empty
+    """
+    if alphas is None:
+        alphas = [0.03, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
+
+    if isinstance(test_dist_matrix, torch.Tensor):
+        dist_mat = test_dist_matrix.detach().cpu().numpy()
+    else:
+        dist_mat = np.asarray(test_dist_matrix)
+
+    if isinstance(test_labels, torch.Tensor):
+        labels = test_labels.detach().cpu().numpy()
+    else:
+        labels = np.asarray(test_labels)
+
+    known_mask = (labels < num_known_classes)
+    unknown_mask = (labels == num_known_classes)
+    n_known = int(known_mask.sum())
+    n_unknown = int(unknown_mask.sum())
+
+    results = []
+    for a in alphas:
+        taus = {}
+        for c in range(num_known_classes):
+            if c in cal_scores_per_class and len(cal_scores_per_class[c]) > 0:
+                taus[c] = compute_finite_sample_quantile(cal_scores_per_class[c], alpha=a)
+            else:
+                taus[c] = float("inf")
+
+        tau_arr = np.array([taus[c] for c in range(num_known_classes)], dtype=np.float64).reshape(1, -1)
+        accepted_mask = dist_mat <= tau_arr  # (N_test, C)
+        is_unknown = ~np.any(accepted_mask, axis=1)  # (N_test,)
+
+        kfr = float(is_unknown[known_mask].mean()) if n_known > 0 else 0.0
+        cov = 1.0 - kfr
+        rec = float(is_unknown[unknown_mask].mean()) if n_unknown > 0 else 0.0
+
+        n_rej = int(is_unknown.sum())
+        tp = int((is_unknown & unknown_mask).sum())
+        prec = float(tp / n_rej) if n_rej > 0 else 0.0
+        f1 = float(2.0 * prec * rec / (prec + rec)) if (prec + rec) > 0.0 else 0.0
+
+        results.append({
+            "alpha": float(a),
+            "nominal_coverage": float(1.0 - a),
+            "empirical_coverage": float(cov),
+            "empirical_kfr": float(kfr),
+            "zero_day_recall": float(rec),
+            "zero_day_precision": float(prec),
+            "zero_day_f1": float(f1),
+            "thresholds": {int(c): float(taus[c]) for c in range(num_known_classes)},
+            "status": "GUARANTEED" if kfr <= (a + 0.005) else "DRIFT",
+        })
+
+    return results
+
+
+class ThreeWayConformalDecisionResult(NamedTuple):
+    """Structured output for Conformal Three-Way Decision with Abstention (Bao & Gao 2025; Yao 2010)."""
+
+    actions: np.ndarray  # 'accept', 'abstain', or 'reject'
+    predictions: np.ndarray  # candidate class if accepted, unknown_label (-1 or C) if rejected or abstained
+    is_accepted: np.ndarray  # True for Positive region (POS): D <= tau_accept
+    is_abstained: np.ndarray  # True for Boundary region (BND): tau_accept < D <= tau_reject
+    is_rejected: np.ndarray  # True for Negative region (NEG): D > tau_reject
+    is_unknown: np.ndarray  # Total flagged non-accepted (is_rejected | is_abstained)
+    candidate_classes: np.ndarray  # argmin_c D(z, c)
+    scores: np.ndarray  # Nonconformity distance to candidate class
+    tau_accept: np.ndarray  # Acceptance threshold used per sample
+    tau_reject: np.ndarray  # Rejection threshold used per sample
+
+    # Backward-compatible aliases
+    @property
+    def is_fast_pass(self) -> np.ndarray:
+        return self.is_accepted
+
+    @property
+    def is_inspected(self) -> np.ndarray:
+        return self.is_abstained
+
+    @property
+    def is_instant_drop(self) -> np.ndarray:
+        return self.is_rejected
+
+    @property
+    def tau_defer(self) -> np.ndarray:
+        return self.tau_accept
+
+    @property
+    def tau_drop(self) -> np.ndarray:
+        return self.tau_reject
+
+
+def compute_three_way_conformal_decision(
+    dist_matrix: np.ndarray | torch.Tensor,
+    tau_reject_map: Optional[Dict[int, float]] = None,
+    tau_accept_map: Optional[Dict[int, float]] = None,
+    unknown_label: int = -1,
+    **kwargs: Any,
+) -> ThreeWayConformalDecisionResult:
+    """Compute Conformal Three-Way Decision with Abstention (POS / BND / NEG).
+
+    Grounded in Decision-Theoretic Rough Sets (Yao 2010; Bao & Gao, Scientific Reports 2025)
+    and calibrated via federated empirical score distributions:
+        - Positive Region (POS / Accept): D(z, c*) <= tau_accept,c*   --> Action a_accept
+        - Boundary Region (BND / Abstain): tau_accept,c* < D(z, c*) <= tau_reject,c* --> Action a_abstain
+        - Negative Region (NEG / Reject): D(z, c*) > tau_reject,c*   --> Action a_reject
+
+    Args:
+        dist_matrix: Distance matrix of shape (N, C) across known classes.
+        tau_reject_map: Dict mapping class_id -> tau_reject (e.g., at nominal alpha_reject = 0.05).
+        tau_accept_map: Dict mapping class_id -> tau_accept (e.g., at nominal alpha_accept = 0.10).
+        unknown_label: Label assigned to rejected/abstained samples.
+
+    Returns:
+        ThreeWayConformalDecisionResult namedtuple with diagnostic decision masks.
+    """
+    # Support backward-compatible kwargs
+    if "tau_drop_map" in kwargs:
+        tau_reject_map = kwargs["tau_drop_map"]
+    if "tau_defer_map" in kwargs:
+        tau_accept_map = kwargs["tau_defer_map"]
+    tau_reject_map = tau_reject_map or {}
+    tau_accept_map = tau_accept_map or {}
+
+    if isinstance(dist_matrix, torch.Tensor):
+        dist_mat = dist_matrix.detach().cpu().numpy()
+    else:
+        dist_mat = np.asarray(dist_matrix)
+
+    n_samples, num_known = dist_mat.shape
+    best_cand = np.argmin(dist_mat, axis=1)
+    scores = dist_mat[np.arange(n_samples), best_cand]
+
+    tau_reject_arr = np.array([tau_reject_map.get(c, float("inf")) for c in best_cand], dtype=np.float64)
+    tau_accept_arr = np.array([tau_accept_map.get(c, float("inf")) for c in best_cand], dtype=np.float64)
+
+    is_accepted = (scores <= tau_accept_arr)
+    is_abstained = (scores > tau_accept_arr) & (scores <= tau_reject_arr)
+    is_rejected = (scores > tau_reject_arr)
+    is_unknown = is_rejected | is_abstained
+
+    actions = np.empty(n_samples, dtype=object)
+    actions[is_accepted] = "accept"
+    actions[is_abstained] = "abstain"
+    actions[is_rejected] = "reject"
+
+    preds = np.where(is_accepted, best_cand, unknown_label)
+
+    return ThreeWayConformalDecisionResult(
+        actions=actions,
+        predictions=preds,
+        is_accepted=is_accepted,
+        is_abstained=is_abstained,
+        is_rejected=is_rejected,
+        is_unknown=is_unknown,
+        candidate_classes=best_cand,
+        scores=scores,
+        tau_accept=tau_accept_arr,
+        tau_reject=tau_reject_arr,
+    )
+

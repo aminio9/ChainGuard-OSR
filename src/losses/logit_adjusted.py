@@ -77,7 +77,7 @@ def compute_laplace_class_priors(
 class LogitAdjustedBalancedLoss(nn.Module):
     """Logit-Adjusted Balanced Risk Minimization Module (L_BLA, Eq. eq:bla_loss)."""
 
-    def __init__(self, tau: float = 1.0, gamma: Optional[float] = None):
+    def __init__(self, tau: float = 0.0, gamma: Optional[float] = None):
         super().__init__()
         scale = float(gamma if gamma is not None else tau)
         self.gamma = scale
@@ -99,6 +99,8 @@ class LogitAdjustedBalancedLoss(nn.Module):
         Returns:
             Scalar balanced cross-entropy loss.
         """
+        if self.gamma == 0.0:
+            return F.cross_entropy(logits, targets)
         priors = class_priors.to(logits.device).clamp(min=1e-3)
         log_priors = torch.log(priors)
         adjusted_logits = logits + self.gamma * log_priors.unsqueeze(0)

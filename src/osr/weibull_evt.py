@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Dict, List, Tuple
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="scipy")
 import numpy as np
 import scipy.stats as stats
 import torch

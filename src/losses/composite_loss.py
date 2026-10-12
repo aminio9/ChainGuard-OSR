@@ -31,10 +31,10 @@ class CompositeLossCalculator:
 
     def __init__(self, config: LossConfig):
         self.config = config
-        gamma_cfg = getattr(config, "gamma_bla", None)
         tau_cfg = getattr(config, "tau_bla", 1.0)
-        self.gamma_bla = float(gamma_cfg if gamma_cfg is not None else tau_cfg)
-        self.tau_bla = self.gamma_bla
+        gamma_cfg = getattr(config, "gamma_bla", None)
+        self.tau_bla = float(tau_cfg)
+        self.gamma_bla = float(gamma_cfg) if gamma_cfg is not None else self.tau_bla
         self.laplace_eps = getattr(config, "laplace_eps", 0.1)
         self.lambda_vib = getattr(config, "lambda_vib", 0.01)
         self.bla_loss_fn = LogitAdjustedBalancedLoss(tau=self.tau_bla, gamma=self.gamma_bla)
@@ -84,7 +84,7 @@ class CompositeLossCalculator:
 
         # 3. Variational Information Bottleneck KL Regularization (L_VIB)
         if self.lambda_vib > 0.0:
-            l_vib = vib_kl_divergence_loss(mu, logvar)
+            l_vib = vib_kl_divergence_loss(mu, logvar, normalize_dim=True)
         else:
             l_vib = torch.tensor(0.0, device=logits.device)
 

@@ -180,3 +180,69 @@ def aggregate_MultiSeed_Summary(
     with open(exp_dir / "summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     return summary
+
+
+def export_round_telemetry_jsonl(
+    output_root: str | Path,
+    experiment_id: str,
+    seed: int,
+    round_history: List[Dict[str, Any]],
+    beta: Optional[float] = None,
+    extra_meta: Optional[Dict[str, Any]] = None,
+) -> Path:
+    """Save round-by-round training telemetry to runs_telemetry/{experiment_id}_seed{seed}.jsonl.
+    
+    Conforms directly to Section 12 Structured Data & Logging Architecture.
+    """
+    telemetry_dir = Path(output_root) / "runs_telemetry"
+    telemetry_dir.mkdir(parents=True, exist_ok=True)
+    
+    clean_exp = experiment_id.replace("/", "_")
+    beta_str = f"_b{beta}" if beta is not None else ""
+    out_file = telemetry_dir / f"{clean_exp}{beta_str}_seed{seed}.jsonl"
+    
+    with open(out_file, "w", encoding="utf-8") as f:
+        for row in round_history:
+            entry = {
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "experiment_id": experiment_id,
+                "seed": int(seed),
+                "round": int(row.get("round", 0)),
+                "beta": float(beta) if beta is not None else float(row.get("beta", 0.0)),
+                "train_loss": float(row.get("train_loss", row.get("loss_bla", 0.0))),
+                "val_loss": float(row.get("val_loss", 0.0)),
+                "val_macro_f1": float(row.get("val_macro_f1", 0.0)),
+                "val_bal_acc": float(row.get("val_closed_accuracy", row.get("accuracy", 0.0))),
+                "client_drift_norm_mean": float(row.get("client_drift_norm_mean", 0.0)),
+                "client_drift_norm_max": float(row.get("client_drift_norm_max", 0.0)),
+                "active_clients": int(row.get("active_clients", 10)),
+                "round_wall_time_sec": float(row.get("round_wall_time_sec", 0.0)),
+                "gpu_mem_allocated_mb": float(row.get("gpu_mem_allocated_mb", 0.0)),
+            }
+            if extra_meta:
+                entry.update(extra_meta)
+            f.write(json.dumps(entry) + "\n")
+            
+    return out_file
+
+
+def export_plot_structured_artifacts(
+    output_root: str | Path,
+    artifact_name: str,
+    **arrays: Any,
+) -> Path:
+    """Save compact numeric numpy arrays to structured_artifacts/{artifact_name}.npz.
+    
+    Conforms directly to Section 12 Structured Data & Logging Architecture (Tier C).
+    Enables instant plotting without re-running models or raw log parsing.
+    """
+    artifacts_dir = Path(output_root) / "structured_artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    
+    if not artifact_name.endswith(".npz"):
+        artifact_name = f"{artifact_name}.npz"
+        
+    out_file = artifacts_dir / artifact_name
+    np.savez_compressed(out_file, **arrays)
+    return out_file
+

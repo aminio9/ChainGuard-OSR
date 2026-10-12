@@ -175,7 +175,7 @@ def evaluate_likelihood_ratio_mia(
             start = b_idx * block_dim
             end = start + block_dim
             d_b = diff[:, start:end]
-            reg_cov = cov_b + tikhonov_eps * torch.eye(block_dim, device=z.device)
+            reg_cov = cov_b + tikhonov_eps * torch.eye(block_dim).to(z.device)
             prec_b = torch.linalg.pinv(reg_cov)
             total_sq += torch.sum(torch.matmul(d_b, prec_b) * d_b, dim=-1)
         return total_sq

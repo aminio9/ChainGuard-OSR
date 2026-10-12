@@ -117,15 +117,23 @@ def compute_oscr(
     k_correct = (closed_preds[known_mask] == y_true[known_mask])
     u_scores = scores[unknown_mask]
 
-    thresholds = np.unique(np.concatenate([k_scores, u_scores]))
-    thresholds = np.sort(thresholds)
-    ccr = np.array([np.sum(k_correct & (k_scores <= t)) / float(n_k) for t in thresholds])
-    fpr = np.array([np.sum(u_scores <= t) / float(n_u) for t in thresholds])
+    thresholds = np.linspace(min(k_scores.min(), u_scores.min()), max(k_scores.max(), u_scores.max()), 1000)
+    k_sort_idx = np.argsort(k_scores)
+    k_scores_sorted = k_scores[k_sort_idx]
+    k_correct_sorted = k_correct[k_sort_idx]
+    cum_correct = np.cumsum(k_correct_sorted)
+
+    indices_k = np.searchsorted(k_scores_sorted, thresholds, side="right") - 1
+    ccr = np.where(indices_k >= 0, cum_correct[np.maximum(indices_k, 0)], 0) / float(n_k)
+
+    indices_u = np.searchsorted(np.sort(u_scores), thresholds, side="right")
+    fpr = indices_u / float(n_u)
 
     fpr = np.concatenate([[0.0], fpr, [1.0]])
     ccr = np.concatenate([[0.0], ccr, [ccr[-1] if len(ccr) > 0 else 0.0]])
     order = np.argsort(fpr, kind="mergesort")
-    oscr = float(np.trapezoid(ccr[order], fpr[order])) if hasattr(np, "trapezoid") else float(np.trapz(ccr[order], fpr[order]))
+    trap = getattr(np, "trapezoid", getattr(np, "trapz", None))
+    oscr = float(trap(ccr[order], fpr[order]))
     return float(np.clip(oscr, 0.0, 1.0))
 
 
@@ -218,6 +226,7 @@ def compute_osr_metrics(
         "unknown_precision": unk_precision,
         "unknown_f1": unk_f1,
         "open_set_macro_f1": float(np.mean(f1_list)),
+        "accuracy": float(np.mean(remapped_true == remapped_pred)),
     }
 
 
