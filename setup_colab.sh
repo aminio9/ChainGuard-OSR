@@ -67,15 +67,26 @@ fi
 
 echo "=== [3/5] Extracting Datasets ==="
 mkdir -p data/raw
-for dzip in fedtros_data_*.zip; do
+for dzip in \
+    /content/drive/MyDrive/FedTROS/fedtros_data_all4.zip \
+    /content/drive/MyDrive/fedtros_data_all4.zip \
+    /content/drive/MyDrive/FedTROS/fedtros_data_bnat.zip \
+    /content/drive/MyDrive/fedtros_data_bnat.zip \
+    /content/fedtros_data_all4.zip \
+    /content/fedtros_data_bnat.zip \
+    fedtros_data_all4.zip \
+    fedtros_data_*.zip; do
     if [ -f "$dzip" ]; then
         echo "  -> Extracting dataset archive: $dzip ..."
-        unzip -q -o "$dzip"
+        unzip -q -o "$dzip" -d data/raw/
     fi
 done
-if [ -f "b_nat.csv" ] && [ ! -f "data/raw/b_nat.csv" ]; then
-    mv b_nat.csv data/raw/b_nat.csv
-fi
+find data/raw -mindepth 2 -type f \( -name "*.csv" -o -name "*.json" \) -exec mv -f {} data/raw/ \; 2>/dev/null || true
+for csv in b_nat.csv b_tat.csv ton_iot.csv cic_ids2017.csv; do
+    if [ -f "$csv" ] && [ ! -f "data/raw/$csv" ]; then
+        mv -f "$csv" data/raw/"$csv"
+    fi
+done
 ls -lh data/raw/ 2>/dev/null || true
 
 echo "=== [4/5] Checking and Installing Missing Dependencies ==="
