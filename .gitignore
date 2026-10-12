@@ -25,14 +25,6 @@ share/python-wheels/
 .installed.cfg
 *.egg
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
 # Unit test / coverage reports
 htmlcov/
 .tox/
@@ -58,7 +50,8 @@ env.bak/
 venv.bak/
 
 # Jupyter Notebook
-.ipynb_checkpoints
+.ipynb_checkpoints/
+*-checkpoint.ipynb
 
 # IDEs & Editors
 .vscode/
@@ -66,10 +59,15 @@ venv.bak/
 *.swp
 *.swo
 
-# Project specific: large data, checkpoints, raw logs
-/data/
+# Project specific: large datasets, checkpoints, weights, raw logs
+data/*
+!data/.gitkeep
 !src/data/
 *.csv
+*.parquet
+*.h5
+*.npy
+*.npz
 checkpoints/*
 !checkpoints/.gitkeep
 results/*
@@ -80,3 +78,6 @@ scratch_*
 *.log
 *.tar.gz
 *.zip
+*.pt
+*.pth
+*.ckpt
