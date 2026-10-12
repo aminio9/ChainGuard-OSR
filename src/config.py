@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Any, List, Optional, Union
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class ExperimentConfig(BaseModel):
@@ -45,19 +45,21 @@ class PartitionConfig(BaseModel):
 
 
 class FederatedConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
     algorithm: str = "fedtros_mc"
     num_clients: int = 10
     client_fraction: float = 1.0
-    num_rounds: int = 50
+    num_rounds: int = 30
     local_epochs: int = 2
     batch_size: int = 64
     primal_dual_rho: float = 0.0
     covariance_prototype_aggregation: bool = False
     share_classifier_head: bool = True
-    num_blocks: int = 4
-    block_dim: int = 16
+    num_blocks: int = 1
+    block_dim: int = 64
     min_cov_samples: int = 3
-    tikhonov_eps: float = 1e-3
+    tikhonov_eps: float = 1e-4
+    shrinkage_method: str = "oas"
     aggregation_strategy: str = "decoupled"
     partition: PartitionConfig = Field(default_factory=PartitionConfig)
 
@@ -66,12 +68,12 @@ class ModelConfig(BaseModel):
     architecture: str = "vib_network"
     in_features: int = 21
     latent_dim: int = 64
-    hidden_dim: Union[int, List[int]] = Field(default_factory=lambda: [512, 256, 128])
+    hidden_dim: Union[int, List[int]] = Field(default_factory=lambda: [128, 64])
     density_dim: int = 0
     dropout: float = 0.1
-    use_batchnorm: bool = False
-    use_layernorm: bool = True
-    activation: str = "gelu"
+    use_batchnorm: bool = True
+    use_layernorm: bool = False
+    activation: str = "relu"
     stochastic_encoder: bool = True
 
 
@@ -86,8 +88,8 @@ class OptimizationConfig(BaseModel):
 
 
 class LossConfig(BaseModel):
-    tau_bla: float = 1.0
-    gamma_bla: Optional[float] = None
+    tau_bla: float = 0.0
+    gamma_bla: Optional[float] = 0.0
     laplace_eps: float = 0.1
     lambda_vib: float = 0.01
     beta_cb: float = 0.999
@@ -102,7 +104,8 @@ class LossConfig(BaseModel):
 
 
 class OSRConfig(BaseModel):
-    method: str = "mondrian_conformal"
+    model_config = ConfigDict(extra="allow")
+    method: str = "block_mahalanobis_conformal"
     weibull_tail_size: int = 20
     energy_temperature: float = 1.0
     conformal_alpha: float = 0.05
@@ -111,6 +114,14 @@ class OSRConfig(BaseModel):
     enable_conformal: bool = True
     enable_block_mahalanobis: bool = True
     msp_threshold: float = 0.5
+    num_blocks: int = 1
+    block_dim: int = 64
+    normalize_features: bool = False
+    shrinkage_method: str = "oas"
+    use_multi_prototype: bool = True
+    num_prototypes_normal: int = 2
+    num_prototypes_attack: int = 1
+    metric_type: str = "mahalanobis"
 
 
 class AppConfig(BaseModel):

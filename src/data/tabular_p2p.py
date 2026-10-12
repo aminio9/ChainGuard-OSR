@@ -137,6 +137,17 @@ def load_benchmark_dataset(
     if not csv_path.is_file():
         raise FileNotFoundError(f"Raw CSV for benchmark '{dataset_name}' not found at: {csv_path}")
 
+    # Safety safeguard: For CIC-IDS2017 (902 MB, ~2.8M rows), loading without subsampling
+    # exceeds 14 GB RAM and causes fatal OOM kills in memory-constrained environments (Colab 12.7 GB limit).
+    # If samples_per_class is None, default to a statistically sound 2000 samples/class (~22k flows).
+    # Pass samples_per_class=-1 to explicitly force loading the entire 2.8M rows on large servers.
+    if key == "cic_ids2017":
+        if samples_per_class is None:
+            print("  [INFO] CIC-IDS2017 contains 2.8M rows (902 MB). Capping at stratified samples_per_class=2000 to prevent system OOM (Colab 12.7 GB RAM limit). (Pass samples_per_class=-1 to force loading entire 2.8M rows).")
+            samples_per_class = 2000
+        elif samples_per_class == -1:
+            samples_per_class = None
+
     c_dir = Path(cache_dir)
     if not c_dir.is_dir():
         c_alt = Path(__file__).resolve().parent.parent.parent / cache_dir
@@ -144,8 +155,15 @@ def load_benchmark_dataset(
             c_dir = c_alt
     cache_path = c_dir / f"{key}_spc_{samples_per_class}.pt"
     if cache_path.is_file():
-        cached = torch.load(cache_path, weights_only=False)
-        return cached["dataset"], cached["metadata"]
+        try:
+            cached = torch.load(cache_path, weights_only=False)
+            return cached["dataset"], cached["metadata"]
+        except (EOFError, RuntimeError, Exception) as cache_err:
+            print(f"  [WARN] Corrupt/incomplete cache detected at {cache_path} ({cache_err}). Rebuilding from raw CSV...")
+            try:
+                cache_path.unlink()
+            except Exception:
+                pass
 
     known_list = meta["known_classes"]
     unknown_list = meta["unknown_classes"]

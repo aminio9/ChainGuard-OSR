@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import copy
 import math
+import os
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count() or 4))
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
@@ -126,13 +130,17 @@ class FederatedServer:
             client_updates.append((updated_params, len(client.dataset), client.samples_per_class))
             round_losses.append(loss_metrics)
 
-        # Decoupled Server Aggregation (LaTeX Algorithm 1 Line 55-56 & Eq. 78):
-        # Average encoder theta over all K nodes, and average each class head psi_c
-        # over active nodes K_c = {k in M : N_{k,c} > 0}.
-        new_global_w = aggregate_decoupled_parameters(
-            client_updates,
-            previous_global_state=current_global_w,
-        )
+        # Server Aggregation: Decoupled by default (LaTeX Algorithm 1 Line 55-56 & Eq. 78),
+        # or monolithic FedAvg for ablation studies.
+        if self.aggregation_strategy in ("fedavg", "monolithic"):
+            from src.aggregation.fedavg_agg import aggregate_fedavg_parameters
+            fedavg_inputs = [(up, n) for up, n, _ in client_updates]
+            new_global_w = aggregate_fedavg_parameters(fedavg_inputs)
+        else:
+            new_global_w = aggregate_decoupled_parameters(
+                client_updates,
+                previous_global_state=current_global_w,
+            )
         self.global_model.load_state_dict(new_global_w)
         self.global_params = new_global_w
         self.global_encoder_params = self.global_model.get_encoder_parameters()
@@ -156,9 +164,9 @@ class FederatedServer:
 
     def run_phase_two_profiling(
         self,
-        num_blocks: int = 4,
-        block_dim: int = 16,
-        alpha: float = 0.05,
+        num_blocks: Optional[int] = None,
+        block_dim: Optional[int] = None,
+        alpha: Optional[float] = None,
         cal_dataset: Optional[Any] = None,
     ) -> Dict[int, GlobalClassProfile]:
         """Execute Stage 2 Class Profiling (Section 4.3) and Stage 3 Distributed Conformal Calibration (Section 4.4).
@@ -168,6 +176,13 @@ class FederatedServer:
         """
         if not self.encoder_frozen:
             self.freeze_global_encoder()
+
+        if num_blocks is None:
+            num_blocks = getattr(self.config.osr, "num_blocks", getattr(self.config.federated, "num_blocks", 1))
+        if block_dim is None:
+            block_dim = getattr(self.config.osr, "block_dim", getattr(self.config.federated, "block_dim", 64))
+        if alpha is None:
+            alpha = getattr(self.config.osr, "conformal_alpha", 0.05)
 
         latent_dim = self.config.model.latent_dim
         if num_blocks * block_dim != latent_dim:
@@ -219,6 +234,58 @@ class FederatedServer:
             min_cov_samples=min_cov_samples,
         )
 
+        # Multi-Prototype Hyperspherical Profiling (AMP-OAS, AEGIS-Net 2026 / MPHIL 2026)
+        # Prototypes are extracted from the TRAINING partition only (client.dataset).
+        # cal_dataset is reserved exclusively for Stage 3 conformal calibration — mixing them
+        # would inflate empirical calibration coverage (prototypes fit to cal → small cal scores
+        # → tight τ → over-rejection) and violate conformal validity.
+        use_mp = getattr(self.config.osr, "use_multi_prototype", True)
+        if use_mp:
+            from torch.utils.data import DataLoader
+            from src.aggregation.total_variance import extract_spherical_class_prototypes_with_covs
+
+            m0 = getattr(self.config.osr, "num_prototypes_normal", 2)
+            mc_atk = getattr(self.config.osr, "num_prototypes_attack", 1)
+            tik_eps = getattr(self.config.federated, "tikhonov_eps", 1e-4)
+
+            # Gather training-partition embeddings per class across all clients
+            train_feats_per_class: Dict[int, List[torch.Tensor]] = {
+                c: [] for c in self.global_profiles.keys()
+            }
+            with torch.no_grad():
+                for cl in self.clients:
+                    train_ds = getattr(cl, "dataset", None)
+                    if train_ds is None or len(train_ds) == 0:
+                        continue
+                    loader_cl = DataLoader(train_ds, batch_size=512, shuffle=False)
+                    for cl_x, cl_y in loader_cl:
+                        cl_x_dev = cl_x.to(self.device)
+                        cl_z = extract_latent_mu(self.global_model.encoder, cl_x_dev)
+                        for c in self.global_profiles.keys():
+                            c_mask = (cl_y == c)
+                            if int(c_mask.sum().item()) > 0:
+                                train_feats_per_class[c].append(cl_z[c_mask.to(cl_z.device)])
+
+            norm_feat = getattr(self.config.osr, "normalize_features", False)
+            for c in self.global_profiles.keys():
+                if train_feats_per_class[c]:
+                    all_c_train = torch.cat(train_feats_per_class[c], dim=0)
+                    M_target = m0 if c == 0 else mc_atk
+                    protos_c, proto_inv_covs_c = extract_spherical_class_prototypes_with_covs(
+                        all_c_train,
+                        num_prototypes=M_target,
+                        num_blocks=num_blocks,
+                        block_dim=block_dim,
+                        tikhonov_eps=tik_eps,
+                        normalize_features=norm_feat,
+                    )
+                    self.global_profiles[c] = self.global_profiles[c]._replace(
+                        prototypes=protos_c,
+                        proto_inv_block_covs=proto_inv_covs_c,
+                    )
+
+
+
         # Stage 3 (Section 4.1 & 4.4): Distributed Mondrian Conformal Calibration over K_{cal, c} = {k in M : n_{cal,k,c} >= 1}
         # Nodes evaluate s_{k,j}^{(c)} = D_block(f_{theta^*}(x_{k,j}), c) on D_{cal, k, c} against global profiles,
         # report scalar maximum s_{max,k,c} so the server defines shared grid [0, S_{max,c}], and upload
@@ -248,8 +315,15 @@ class FederatedServer:
                         all_cal_y.append(cy.to(self.device))
                 cal_z_all = torch.cat(all_cal_z, dim=0)
                 cal_y_all = torch.cat(all_cal_y, dim=0)
+                metric_type = getattr(self.config.osr, "metric_type", "mahalanobis")
+                norm_feat_cal = getattr(self.config.osr, "normalize_features", False)
                 class_dists = compute_block_mahalanobis_distances(
-                    cal_z_all, self.global_profiles, num_blocks=num_blocks, block_dim=block_dim
+                    cal_z_all,
+                    self.global_profiles,
+                    num_blocks=num_blocks,
+                    block_dim=block_dim,
+                    normalize_features=norm_feat_cal,
+                    metric_type=metric_type,
                 )
                 import scipy.stats as stats
                 fallback_chi2_tau = float(stats.chi2.ppf(1.0 - alpha, df=num_blocks * block_dim))
@@ -263,9 +337,12 @@ class FederatedServer:
                     if all_true_dists
                     else fallback_chi2_tau
                 )
+                self.cal_scores_per_class = {}
                 for c in class_keys:
                     true_mask = (cal_y_all == c)
                     n_cal_c = int(true_mask.sum().item())
+                    if n_cal_c > 0:
+                        self.cal_scores_per_class[int(c)] = class_dists[c][true_mask].detach().cpu().numpy()
                     new_tau = (
                         float(compute_finite_sample_quantile(class_dists[c][true_mask], alpha=alpha))
                         if n_cal_c > 0
@@ -357,12 +434,18 @@ class FederatedServer:
     def broadcast_profiles_to_clients(
         self,
         unknown_label: int = -1,
-        num_blocks: int = 4,
-        block_dim: int = 16,
+        num_blocks: Optional[int] = None,
+        block_dim: Optional[int] = None,
     ) -> None:
         """Broadcast global class profiles back to all edge nodes (LaTeX Algorithm 1 Line 25 & Algorithm 2 Line 1)."""
         if not self.global_profiles:
             raise RuntimeError("Profiles must be aggregated before broadcasting to clients.")
+
+        if num_blocks is None:
+            num_blocks = getattr(self.config.osr, "num_blocks", getattr(self.config.federated, "num_blocks", 1))
+        if block_dim is None:
+            block_dim = getattr(self.config.osr, "block_dim", getattr(self.config.federated, "block_dim", 64))
+
         for client in self.clients:
             client.receive_global_profiles(
                 profiles=self.global_profiles,
@@ -375,24 +458,35 @@ class FederatedServer:
     def get_edge_detector(
         self,
         unknown_label: int = -1,
-        num_blocks: int = 4,
-        block_dim: int = 16,
+        num_blocks: Optional[int] = None,
+        block_dim: Optional[int] = None,
+        normalize_features: Optional[bool] = None,
     ) -> WireSpeedEdgeDetector:
         """Instantiate the Phase III Wire-Speed Edge Detector (LaTeX Algorithm 2)."""
         if not self.global_profiles:
             raise RuntimeError("Phase II profiling must be executed before creating Edge Detector.")
+
+        if num_blocks is None:
+            num_blocks = getattr(self.config.osr, "num_blocks", getattr(self.config.federated, "num_blocks", 1))
+        if block_dim is None:
+            block_dim = getattr(self.config.osr, "block_dim", getattr(self.config.federated, "block_dim", 64))
 
         latent_dim = self.config.model.latent_dim
         if num_blocks * block_dim != latent_dim:
             num_blocks = min(num_blocks, latent_dim)
             block_dim = latent_dim // num_blocks
 
+        if normalize_features is None:
+            normalize_features = getattr(self.config.osr, "normalize_features", False)
+        metric_type = getattr(self.config.osr, "metric_type", "mahalanobis")
         return WireSpeedEdgeDetector(
             frozen_encoder=self.global_model.encoder,
             global_profiles=self.global_profiles,
             unknown_label=unknown_label,
             num_blocks=num_blocks,
             block_dim=block_dim,
+            normalize_features=normalize_features,
+            metric_type=metric_type,
         )
 
     def evaluate_federated_edge_clients(

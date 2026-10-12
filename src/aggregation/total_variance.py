@@ -7,7 +7,7 @@ any raw feature vectors, mathematically preserving between-client dispersion und
 from __future__ import annotations
 
 import math
-from typing import Dict, List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional, Tuple
 import torch
 
 
@@ -31,6 +31,41 @@ class GlobalClassProfile(NamedTuple):
     block_covs: List[torch.Tensor]  # B block-diagonal covariance tensors of shape (d_b, d_b)
     inv_block_covs: List[torch.Tensor]  # Precomputed inverted block matrices
     conformal_threshold: float = 0.0  # Mondrian conformal threshold tau_{alpha, c}
+    prototypes: Optional[torch.Tensor] = None  # Optional multi-prototypes tensor of shape (M_c, d_z)
+    # Per-prototype per-block precision matrices: list of M_c lists, each containing B (d_b, d_b) tensors.
+    # proto_inv_block_covs[m][b] = (Sigma_{c,m,G_b}^*)^{-1}, covariance around the *normalized* prototype mu_{c,m}.
+    # None when single-centroid (legacy path).
+    proto_inv_block_covs: Optional[List[List[torch.Tensor]]] = None
+
+
+def compute_server_side_oas_shrinkage(
+    cov_sym: torch.Tensor,
+    total_samples: int,
+    tikhonov_eps: float = 1e-4,
+) -> Tuple[torch.Tensor, float]:
+    """Oracle Approximating Shrinkage (OAS, Chen et al. 2010) on pooled covariance.
+    
+    Computes optimal shrinkage intensity in closed form from Tr(Sigma) and Tr(Sigma^2),
+    preserving federated privacy without requiring client raw data or 4th-order moments.
+    """
+    d_b = cov_sym.size(0)
+    device = cov_sym.device
+    dtype = cov_sym.dtype
+
+    tr_s = torch.trace(cov_sym)
+    tr_s2 = torch.trace(torch.matmul(cov_sym, cov_sym))
+    mu = tr_s / float(d_b)
+
+    num = (1.0 - 2.0 / float(d_b)) * tr_s2 + (tr_s ** 2)
+    den = (float(total_samples) + 1.0 - 2.0 / float(d_b)) * (tr_s2 - (tr_s ** 2) / float(d_b))
+
+    if den.item() > 0:
+        rho = float(torch.clamp(num / den, min=0.0, max=1.0).item())
+    else:
+        rho = 1.0
+
+    sigma_shrunk = (1.0 - rho) * cov_sym + (rho * mu + tikhonov_eps) * torch.eye(d_b, dtype=dtype).to(device)
+    return sigma_shrunk, rho
 
 
 def build_global_profile_from_moments(
@@ -38,8 +73,10 @@ def build_global_profile_from_moments(
     total_samples: int,
     mu: torch.Tensor,
     block_covs: List[torch.Tensor],
-    tikhonov_eps: float = 1e-3,
+    tikhonov_eps: float = 1e-4,
     conformal_threshold: float = 0.0,
+    use_oas: bool = True,
+    prototypes: Optional[torch.Tensor] = None,
 ) -> GlobalClassProfile:
     """Construct a GlobalClassProfile with symmetrized and regularized inverse block covariances."""
     device = mu.device
@@ -49,9 +86,16 @@ def build_global_profile_from_moments(
 
     for cov_b in block_covs:
         d_b = cov_b.size(0)
-        reg_eye = tikhonov_eps * torch.eye(d_b, dtype=dtype, device=device)
-        sigma_b = cov_b.to(dtype=dtype, device=device) + reg_eye
-        sigma_b = 0.5 * (sigma_b + sigma_b.t())
+        cov_dev = cov_b.to(dtype=dtype, device=device)
+        cov_sym = 0.5 * (cov_dev + cov_dev.t())
+        
+        if use_oas:
+            sigma_b, _ = compute_server_side_oas_shrinkage(cov_sym, total_samples, tikhonov_eps=tikhonov_eps)
+        else:
+            tr_b = torch.trace(cov_sym) / float(d_b)
+            rho = max(1e-4, min(0.2, float(d_b) / max(float(total_samples), 1.0)))
+            sigma_b = (1.0 - rho) * cov_sym + (rho * tr_b + tikhonov_eps) * torch.eye(d_b, dtype=dtype).to(device)
+
         try:
             inv_b = torch.linalg.inv(sigma_b)
         except RuntimeError:
@@ -66,6 +110,7 @@ def build_global_profile_from_moments(
         block_covs=reg_covs,
         inv_block_covs=inv_covs,
         conformal_threshold=conformal_threshold,
+        prototypes=prototypes.to(dtype=dtype, device=device) if prototypes is not None else None,
     )
 
 
@@ -146,7 +191,7 @@ def aggregate_total_variance_moments(
         ]
         n_c_cov = float(max(sum(s.sample_count for s in cov_subs), 1))
 
-        reg_eye = tikhonov_eps * torch.eye(curr_db, dtype=dtype, device=device)
+        reg_eye = tikhonov_eps * torch.eye(curr_db, dtype=dtype).to(device)
         global_block_covs: List[torch.Tensor] = []
         inv_block_covs: List[torch.Tensor] = []
 
@@ -171,13 +216,15 @@ def aggregate_total_variance_moments(
                         # Naive within-client mean covariance (omits between-client dispersion)
                         pooled_b += n_k * local_block_cov
 
-                # Normalize by N_c^{cov} and add Tikhonov stabilizer eps_v * I_{d_b}
-                sigma_c_b = (pooled_b / n_c_cov) + reg_eye
+                # Normalize by N_c^{cov} and apply Server-Side OAS Shrinkage (if regularized)
+                raw_cov = pooled_b / n_c_cov
+                raw_cov = 0.5 * (raw_cov + raw_cov.t())
+                if tikhonov_eps > 0.0:
+                    sigma_c_b, _ = compute_server_side_oas_shrinkage(raw_cov, int(n_c_cov), tikhonov_eps=tikhonov_eps)
+                else:
+                    sigma_c_b = raw_cov
             else:
-                sigma_c_b = torch.eye(curr_db, dtype=dtype, device=device) + reg_eye
-
-            # Symmetrize numerically
-            sigma_c_b = 0.5 * (sigma_c_b + sigma_c_b.t())
+                sigma_c_b = torch.eye(curr_db, dtype=dtype).to(device) + reg_eye
 
             # Invert for wire-speed Mahalanobis inference
             try:
@@ -210,3 +257,180 @@ def aggregate_total_variance_moments(
         )
 
     return profiles
+
+
+def extract_spherical_class_prototypes(
+    features: torch.Tensor,
+    num_prototypes: int,
+    random_state: int = 42,
+) -> torch.Tensor:
+    """Extract M_c spherical prototype centroids from class features on S^{d-1} (MPHIL 2026 / AEGIS-Net 2026).
+
+    Args:
+        features: (N, d) feature tensor.
+        num_prototypes: Target number of prototypes M_c.
+        random_state: Random seed for deterministic clustering.
+
+    Returns:
+        (M_c, d) Tensor of L2-normalized prototype centroids.
+    """
+    device = features.device
+    dtype = features.dtype
+    n_samples = features.size(0)
+
+    # Normalize features onto unit sphere
+    norms = torch.norm(features, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+    feat_norm = (features / norms).cpu().numpy()
+
+    k_actual = min(num_prototypes, n_samples)
+    if k_actual <= 1:
+        mean_v = features.mean(dim=0, keepdim=True)
+        mean_v = mean_v / torch.norm(mean_v, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+        return mean_v.to(dtype=dtype, device=device)
+
+    from sklearn.cluster import KMeans
+    km = KMeans(n_clusters=k_actual, random_state=random_state, n_init=5)
+    km.fit(feat_norm)
+    centers = torch.from_numpy(km.cluster_centers_).to(dtype=dtype, device=device)
+    centers_norm = centers / torch.norm(centers, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+    return centers_norm
+
+
+def extract_spherical_class_prototypes_with_covs(
+    features: torch.Tensor,
+    num_prototypes: int,
+    num_blocks: int,
+    block_dim: int,
+    tikhonov_eps: float = 1e-4,
+    random_state: int = 42,
+    pooled_covariance: bool = True,
+    normalize_features: bool = False,
+) -> Tuple[torch.Tensor, List[List[torch.Tensor]]]:
+    """Extract M_c spherical or Euclidean prototypes AND per-prototype per-block OAS-regularized inverse covariances.
+
+    Args:
+        features: (N, d_z) feature tensor.
+        num_prototypes: Target number of prototypes M_c.
+        num_blocks: Number of block-diagonal sub-blocks B.
+        block_dim: Dimension of each sub-block d_b = d_z / B.
+        tikhonov_eps: Tikhonov ridge applied after OAS shrinkage for numerical safety.
+        random_state: RNG seed for reproducibility.
+        pooled_covariance: If True (default), pools within-prototype scatter across all class samples.
+        normalize_features: If True, projects to S^{d-1}. If False (default), preserves anisotropic R^{d_z}.
+
+    Returns:
+        proto_centroids: (M_c, d_z) prototype centroids.
+        proto_inv_block_covs: list of M_c lists of inverse block covariances.
+    """
+    import numpy as np
+    from sklearn.cluster import KMeans
+
+    device = features.device
+    dtype = torch.float32
+    n_samples = features.size(0)
+
+    # --- Step 1: Feature preparation (Spherical or Euclidean) ---
+    f32 = features.to(dtype=dtype)
+    if normalize_features:
+        norms = torch.norm(f32, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+        feat_norm = f32 / norms  # (N, d_z), each row on unit sphere
+    else:
+        feat_norm = f32
+    feat_np = feat_norm.cpu().numpy()
+
+    k_actual = min(num_prototypes, n_samples)
+
+    # --- Step 2: Cluster features ---
+    if k_actual <= 1:
+        mean_v = feat_norm.mean(dim=0)
+        if normalize_features:
+            mean_v = mean_v / torch.norm(mean_v, p=2).clamp(min=1e-8)
+        proto_centroids = mean_v.unsqueeze(0)  # (1, d_z)
+        labels_np = np.zeros(n_samples, dtype=np.int32)
+    else:
+        km = KMeans(n_clusters=k_actual, random_state=random_state, n_init=5)
+        km.fit(feat_np)
+        labels_np = km.labels_  # (N,)
+        centers_raw = torch.from_numpy(km.cluster_centers_).to(dtype=dtype, device=device)
+        if normalize_features:
+            centers_norm = centers_raw / torch.norm(centers_raw, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+            proto_centroids = centers_norm  # (M_c, d_z)
+        else:
+            proto_centroids = centers_raw
+
+    M_c = proto_centroids.size(0)
+    d_z = feat_norm.size(1)
+
+    # Reconcile block geometry
+    curr_B = num_blocks
+    curr_db = block_dim
+    if curr_B * curr_db != d_z:
+        curr_B = min(curr_B, d_z)
+        curr_db = d_z // curr_B
+
+    labels_t = torch.from_numpy(labels_np.astype(np.int64)).to(device)
+
+    proto_inv_block_covs: List[List[torch.Tensor]] = []
+
+    if pooled_covariance:
+        # Pooled within-prototype covariance: pool deviations around nearest prototype
+        # across all N_c class samples. Guarantees uniform metric manifold across prototypes.
+        xc_within = torch.zeros_like(feat_norm)
+        for m in range(M_c):
+            cluster_mask = (labels_t == m)
+            if int(cluster_mask.sum().item()) > 0:
+                xc_within[cluster_mask] = feat_norm[cluster_mask] - proto_centroids[m]
+
+        pooled_inv_blocks: List[torch.Tensor] = []
+        for b in range(curr_B):
+            start = b * curr_db
+            end = start + curr_db
+            xc_b = xc_within[:, start:end]
+            if n_samples > 1:
+                raw_cov = torch.matmul(xc_b.t(), xc_b) / float(n_samples)
+            else:
+                raw_cov = torch.eye(curr_db, dtype=dtype).to(device)
+            raw_cov = 0.5 * (raw_cov + raw_cov.t())
+            sigma_b, _ = compute_server_side_oas_shrinkage(raw_cov, n_samples, tikhonov_eps=tikhonov_eps)
+            try:
+                inv_b = torch.linalg.inv(sigma_b)
+            except RuntimeError:
+                inv_b = torch.linalg.pinv(sigma_b)
+            pooled_inv_blocks.append(inv_b)
+
+        proto_inv_block_covs = [pooled_inv_blocks for _ in range(M_c)]
+    else:
+        for m in range(M_c):
+            cluster_mask = (labels_t == m)
+            z_m = feat_norm[cluster_mask]       # (N_m, d_z) — already on sphere
+            N_m = z_m.size(0)
+            mu_m = proto_centroids[m]           # (d_z,) — normalized prototype
+
+            inv_blocks_m: List[torch.Tensor] = []
+            for b in range(curr_B):
+                start = b * curr_db
+                end = start + curr_db
+                z_m_b = z_m[:, start:end]       # (N_m, d_b)
+                mu_m_b = mu_m[start:end]        # (d_b,)
+
+                diff_b = z_m_b - mu_m_b.unsqueeze(0)   # (N_m, d_b)
+                if N_m > 1:
+                    raw_cov = torch.matmul(diff_b.t(), diff_b) / float(N_m)
+                else:
+                    raw_cov = torch.eye(curr_db, dtype=dtype).to(device)
+
+                # Symmetrize and apply OAS
+                raw_cov = 0.5 * (raw_cov + raw_cov.t())
+                sigma_b, _ = compute_server_side_oas_shrinkage(raw_cov, N_m, tikhonov_eps=tikhonov_eps)
+
+                try:
+                    inv_b = torch.linalg.inv(sigma_b)
+                except RuntimeError:
+                    inv_b = torch.linalg.pinv(sigma_b)
+
+                inv_blocks_m.append(inv_b)
+
+            proto_inv_block_covs.append(inv_blocks_m)
+
+    return proto_centroids, proto_inv_block_covs
+

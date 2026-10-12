@@ -142,6 +142,10 @@ class FederatedClient:
         else:
             self.model.load_state_dict(global_params, strict=False)
 
+        # Clear optimizer momentum state to eliminate stale client drift
+        if hasattr(self, "optimizer"):
+            self.optimizer.state.clear()
+
     def get_parameters(self) -> Dict[str, torch.Tensor]:
         """Extract full model state dict w_k = (theta_k, phi_k)."""
         return {k: v.clone() for k, v in self.model.state_dict().items()}
@@ -263,6 +267,9 @@ class FederatedClient:
             all_z.append(mu_z)
 
         z_all = torch.cat(all_z, dim=0) if all_z else torch.empty((0, self.config.model.latent_dim), device=self.device)
+        if getattr(self.config.osr, "normalize_features", False):
+            norm_z = torch.norm(z_all, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+            z_all = z_all / norm_z
         y_all = self.labels_dev
 
         actual_latent = z_all.size(1)
@@ -344,11 +351,15 @@ class FederatedClient:
         cal_z_all = torch.cat(all_cal_z, dim=0) if all_cal_z else torch.empty((0, self.config.model.latent_dim), device=self.device)
         cal_y_all = self.cal_labels_dev
 
+        metric_type = getattr(self.config.osr, "metric_type", "mahalanobis")
+        normalize_features = getattr(self.config.osr, "normalize_features", False)
         class_dists = compute_block_mahalanobis_distances(
             cal_z_all,
             global_profiles,
             num_blocks=num_blocks,
             block_dim=block_dim,
+            normalize_features=normalize_features,
+            metric_type=metric_type,
         )
 
         scores_by_class: Dict[int, torch.Tensor] = {}
@@ -402,6 +413,8 @@ class FederatedClient:
         """
         from src.osr.block_mahalanobis import WireSpeedEdgeDetector
 
+        normalize_features = getattr(self.config.osr, "normalize_features", False)
+        metric_type = getattr(self.config.osr, "metric_type", "mahalanobis")
         self.global_profiles = profiles
         self.edge_detector = WireSpeedEdgeDetector(
             frozen_encoder=frozen_encoder,
@@ -409,6 +422,8 @@ class FederatedClient:
             unknown_label=unknown_label,
             num_blocks=num_blocks,
             block_dim=block_dim,
+            normalize_features=normalize_features,
+            metric_type=metric_type,
         )
 
     def evaluate_edge_traffic(
