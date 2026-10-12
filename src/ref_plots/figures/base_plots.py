@@ -885,7 +885,13 @@ def plot_13_communication(block: dict[str, Any], out: Path) -> None:
 
 
 def plot_14_ablation(block: dict[str, Any], out: Path) -> None:
-    df = pd.DataFrame(block["rows"]).sort_values("macro_f1_percent")
+    rows = block.get("rows", [])
+    if not rows:
+        return
+    df = pd.DataFrame(rows)
+    if "macro_f1_percent" not in df.columns:
+        return
+    df = df.sort_values("macro_f1_percent")
     fig, ax = plt.subplots(figsize=(7.8, 4.8), layout="constrained")
     
     for i, (_, row) in enumerate(df.iterrows()):

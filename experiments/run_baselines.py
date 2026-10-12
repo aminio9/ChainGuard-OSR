@@ -21,7 +21,7 @@ root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List, Tuple
 import numpy as np
 import torch
 
@@ -53,6 +53,82 @@ from src.visualization.latex_tables import (
     generate_latex_closed_set_table,
     generate_latex_paper_table2,
 )
+
+try:
+    from src.osr.conformal import (
+        compute_finite_sample_quantile,
+        evaluate_conformal_sensitivity_sweep,
+    )
+except ImportError:
+    def compute_finite_sample_quantile(
+        scores: np.ndarray | torch.Tensor,
+        alpha: float = 0.05,
+    ) -> float:
+        if isinstance(scores, torch.Tensor):
+            scores_np = scores.detach().cpu().numpy().flatten()
+        else:
+            scores_np = np.asarray(scores).flatten()
+        n = len(scores_np)
+        if n == 0:
+            return float("inf")
+        target_rank = np.ceil((n + 1) * (1.0 - alpha))
+        if target_rank > n:
+            return float(max(float(np.max(scores_np)), 1e-12))
+        q_level = float(min(1.0, max(0.0, target_rank / float(n))))
+        return float(np.quantile(scores_np, q_level, method="higher"))
+
+    def evaluate_conformal_sensitivity_sweep(
+        cal_scores_per_class: Dict[int, np.ndarray | torch.Tensor],
+        test_dist_matrix: np.ndarray | torch.Tensor,
+        test_labels: np.ndarray | torch.Tensor,
+        num_known_classes: int,
+        alphas: Optional[List[float]] = None,
+    ) -> List[Dict[str, Any]]:
+        if alphas is None:
+            alphas = [0.03, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
+        if isinstance(test_dist_matrix, torch.Tensor):
+            dist_mat = test_dist_matrix.detach().cpu().numpy()
+        else:
+            dist_mat = np.asarray(test_dist_matrix)
+        if isinstance(test_labels, torch.Tensor):
+            labels = test_labels.detach().cpu().numpy()
+        else:
+            labels = np.asarray(test_labels)
+
+        known_mask = (labels < num_known_classes)
+        unknown_mask = (labels == num_known_classes)
+        n_known = int(known_mask.sum())
+        n_unknown = int(unknown_mask.sum())
+        results = []
+        for a in alphas:
+            taus = {}
+            for c in range(num_known_classes):
+                if c in cal_scores_per_class and len(cal_scores_per_class[c]) > 0:
+                    taus[c] = compute_finite_sample_quantile(cal_scores_per_class[c], alpha=a)
+                else:
+                    taus[c] = float("inf")
+            tau_arr = np.array([taus[c] for c in range(num_known_classes)], dtype=np.float64).reshape(1, -1)
+            accepted_mask = dist_mat <= tau_arr
+            is_unknown = ~np.any(accepted_mask, axis=1)
+            kfr = float(is_unknown[known_mask].mean()) if n_known > 0 else 0.0
+            cov = 1.0 - kfr
+            rec = float(is_unknown[unknown_mask].mean()) if n_unknown > 0 else 0.0
+            n_rej = int(is_unknown.sum())
+            tp = int((is_unknown & unknown_mask).sum())
+            prec = float(tp / n_rej) if n_rej > 0 else 0.0
+            f1 = float(2.0 * prec * rec / (prec + rec)) if (prec + rec) > 0.0 else 0.0
+            results.append({
+                "alpha": float(a),
+                "nominal_coverage": float(1.0 - a),
+                "empirical_coverage": float(cov),
+                "empirical_kfr": float(kfr),
+                "zero_day_recall": float(rec),
+                "zero_day_precision": float(prec),
+                "zero_day_f1": float(f1),
+                "thresholds": {int(c): float(taus[c]) for c in range(num_known_classes)},
+                "status": "GUARANTEED" if kfr <= (a + 0.005) else "DRIFT",
+            })
+        return results
 from src.baselines import (
     FedAvgBaseline,
     FedProxBaseline,
@@ -109,7 +185,9 @@ def evaluate_method_configuration(
     if beta_dirichlet is None and beta is not None:
         beta_dirichlet = beta
 
-    overrides: Dict[str, Any] = {}
+    import copy
+    passed_overrides = kwargs.get("overrides", {}) or {}
+    overrides: Dict[str, Any] = copy.deepcopy(passed_overrides)
     if beta_dirichlet is not None:
         overrides.setdefault("federated", {})["partition"] = {"beta_dirichlet": beta_dirichlet}
 
@@ -228,6 +306,20 @@ def evaluate_method_configuration(
     elif clean_key in MODULAR_BASELINE_REGISTRY:
         target_cls = MODULAR_BASELINE_REGISTRY[clean_key]
 
+    # Automatically resolve effective scoring method from method_name or config
+    eff_scoring = scoring_method
+    if eff_scoring == "native":
+        cfg_osr = getattr(config, "osr_method", None)
+        m_lower = method_name.lower()
+        if "openmax" in m_lower or cfg_osr in ["weibull_openmax", "openmax"]:
+            eff_scoring = "openmax"
+        elif "energy" in m_lower or cfg_osr in ["energy_ood", "energy"]:
+            eff_scoring = "energy"
+        elif "mahalanobis" in m_lower or cfg_osr in ["mahalanobis", "vanilla_mahalanobis"]:
+            eff_scoring = "mahalanobis"
+        elif "msp" in m_lower or cfg_osr in ["maximum_softmax_probability", "msp"]:
+            eff_scoring = "msp"
+
     if target_cls is not None:
         client_datasets = [
             FlowDataset(
@@ -236,13 +328,17 @@ def evaluate_method_configuration(
             )
             for sub_idx in client_indices.values()
         ]
-        baseline = target_cls(
-            in_features=train_ds.features.shape[1],
-            num_classes=num_known,
-            latent_dim=config.model.latent_dim,
-            hidden_dim=config.model.hidden_dim,
-            device=device,
-        )
+        init_kwargs = {
+            "in_features": train_ds.features.shape[1],
+            "num_classes": num_known,
+            "latent_dim": config.model.latent_dim,
+            "hidden_dim": config.model.hidden_dim,
+            "device": device,
+        }
+        if target_cls == MODULAR_BASELINE_REGISTRY.get("FedProx"):
+            init_kwargs["mu_prox"] = getattr(config.loss, "fedprox_mu", 0.01)
+
+        baseline = target_cls(**init_kwargs)
         ckpt_base_dir = Path(kwargs.get("checkpoint_dir", "checkpoints"))
         t_base_start = time.perf_counter()
         fit_history = baseline.fit(
@@ -263,12 +359,16 @@ def evaluate_method_configuration(
             test_closed_ds=test_closed_ds,
             cal_ds=cal_ds,
             conformal_alpha=config.osr.conformal_alpha,
-            scoring_method=scoring_method,
+            scoring_method=eff_scoring,
             use_mondrian=use_mondrian,
         )
         t_base_eval = time.perf_counter() - t_base_eval_start
 
-        base_model = getattr(baseline, "model", None) or getattr(baseline, "global_model", None)
+        base_model = (
+            getattr(baseline, "model", None)
+            or getattr(baseline, "global_model", None)
+            or getattr(getattr(baseline, "fedavg", None), "model", None)
+        )
         num_params_base = sum(p.numel() for p in base_model.parameters()) if base_model is not None else 0
         base_comm_bytes = int(2 * num_params_base * 4 * rounds)
 
@@ -409,8 +509,13 @@ def evaluate_method_configuration(
         num_blocks=config.federated.num_blocks,
         block_dim=config.federated.block_dim,
         alpha=config.osr.conformal_alpha,
-    )
+        cal_dataset=cal_ds,)
     t_phase2 = time.perf_counter() - t_p2_start
+
+    print(f"\n    [STAGE 2 & 3: MULTI-PROTOTYPE PROFILING & CONFORMAL CALIBRATION]")
+    for c, prof in server.global_profiles.items():
+        n_protos = prof.prototypes.size(0) if getattr(prof, "prototypes", None) is not None else 1
+        print(f"      * Class {c}: {n_protos:2d} prototypes | Conformal tau = {prof.conformal_threshold:.4f} (alpha = {config.osr.conformal_alpha})")
 
     num_params = sum(p.numel() for p in server.global_model.parameters())
     p1_bytes = int(2 * num_params * 4 * rounds)
@@ -482,13 +587,20 @@ def evaluate_method_configuration(
     _, _, preds_closed, _ = edge_detector.predict_batch(test_closed_ds.features)
 
     y_open_true = test_open_ds.labels.numpy()
+    from src.metrics.osr_metrics import compute_binary_auroc, compute_fpr95
+    y_bin = (y_open_true == num_known).astype(int)
+
     metrics = compute_osr_metrics(
         y_true=y_open_true,
         y_pred=det["predictions"],
-        anomaly_scores=det["normalized_scores"],
+        anomaly_scores=det["raw_scores"],
         num_known_classes=num_known,
         unknown_label=num_known,
     )
+    metrics["auroc_raw"] = float(metrics["auroc"])
+    metrics["fpr95_raw"] = float(metrics["fpr95"])
+    metrics["auroc_normalized"] = float(compute_binary_auroc(y_bin, det["normalized_scores"]))
+    metrics["fpr95_normalized"] = float(compute_fpr95(y_bin, det["normalized_scores"]))
 
     y_closed_true = test_closed_ds.labels.numpy()
     server.global_model.eval()
@@ -521,15 +633,135 @@ def evaluate_method_configuration(
     metrics["mahalanobis_closed_accuracy"] = float(closed_metrics["accuracy"])
     metrics["mahalanobis_closed_macro_f1"] = float(closed_metrics["macro_f1"])
 
+    # Pairwise separability (Zero-Day vs each individual known class)
+    pairwise_auroc_raw: Dict[int, float] = {}
+    pairwise_auroc_norm: Dict[int, float] = {}
+    for c in range(num_known):
+        m_c = (y_open_true == c) | (y_open_true == num_known)
+        if int(m_c.sum()) > 0 and int((y_open_true == c).sum()) > 0 and int((y_open_true == num_known).sum()) > 0:
+            pairwise_auroc_raw[int(c)] = float(compute_binary_auroc(y_bin[m_c], det["raw_scores"][m_c]))
+            pairwise_auroc_norm[int(c)] = float(compute_binary_auroc(y_bin[m_c], det["normalized_scores"][m_c]))
+    metrics["pairwise_auroc_raw"] = pairwise_auroc_raw
+    metrics["pairwise_auroc_normalized"] = pairwise_auroc_norm
+
+    # Score distribution statistics for known vs zero-day unknown
+    k_mask = (y_bin == 0)
+    u_mask = (y_bin == 1)
+    raw_k = det["raw_scores"][k_mask]
+    raw_u = det["raw_scores"][u_mask]
+    norm_k = det["normalized_scores"][k_mask]
+    norm_u = det["normalized_scores"][u_mask]
+
+    metrics["score_stats"] = {
+        "raw_known_mean": float(np.mean(raw_k)),
+        "raw_known_std": float(np.std(raw_k)),
+        "raw_known_p95": float(np.percentile(raw_k, 95)),
+        "raw_unknown_mean": float(np.mean(raw_u)),
+        "raw_unknown_std": float(np.std(raw_u)),
+        "raw_unknown_median": float(np.median(raw_u)),
+        "norm_known_mean": float(np.mean(norm_k)),
+        "norm_known_std": float(np.std(norm_k)),
+        "norm_known_p95": float(np.percentile(norm_k, 95)),
+        "norm_unknown_mean": float(np.mean(norm_u)),
+        "norm_unknown_std": float(np.std(norm_u)),
+        "norm_unknown_median": float(np.median(norm_u)),
+        "separation_margin_raw": float(np.mean(raw_u) - np.mean(raw_k)),
+        "separation_margin_norm": float(np.mean(norm_u) - np.mean(norm_k)),
+    }
+
+    # Binned density distributions for instant plotting (KDE / Histogram curves)
+    max_score = float(np.percentile(norm_u, 99.0)) if len(norm_u) > 0 else 10.0
+    bins = np.linspace(0.0, max(max_score, 5.0), 51)
+    h_k, _ = np.histogram(norm_k, bins=bins, density=True)
+    h_u, _ = np.histogram(norm_u, bins=bins, density=True)
+    metrics["score_distribution_hist"] = {
+        "bin_edges": [round(float(b), 4) for b in bins],
+        "known_density": [round(float(h), 6) for h in h_k],
+        "unknown_density": [round(float(h), 6) for h in h_u],
+    }
+
+    # Sampled latent embeddings for t-SNE / PCA / UMAP visualization (Figure generation)
+    np.random.seed(config.experiment.seed)
+    sample_indices: List[int] = []
+    for c in range(num_known + 1):
+        c_idx = np.where(y_open_true == c)[0]
+        if len(c_idx) > 0:
+            sample_count = min(len(c_idx), 250)
+            sampled = np.random.choice(c_idx, sample_count, replace=False)
+            sample_indices.extend(sampled.tolist())
+    sample_indices = sorted(sample_indices)
+    metrics["sample_embeddings"] = {
+        "indices": sample_indices,
+        "y_true": [int(y_open_true[i]) for i in sample_indices],
+        "latent_z": [[round(float(v), 5) for v in row] for row in det["latent_z"][sample_indices]],
+        "raw_scores": [round(float(det["raw_scores"][i]), 4) for i in sample_indices],
+        "normalized_scores": [round(float(det["normalized_scores"][i]), 4) for i in sample_indices],
+        "predictions": [int(det["predictions"][i]) for i in sample_indices],
+    }
+
+    # Class profiles and conformal metadata audit
+    known_names = meta.get("known_class_names", [f"Class_{c}" for c in range(num_known)])
+    class_wise_f1 = closed_metrics.get("class_wise_f1", [])
+    metrics["class_profiles_metadata"] = {
+        int(c): {
+            "name": known_names[c] if c < len(known_names) else f"Class_{c}",
+            "num_prototypes": prof.prototypes.size(0) if getattr(prof, "prototypes", None) is not None else 1,
+            "conformal_tau": float(prof.conformal_threshold),
+            "cal_samples": int(server.calibration_counts.get(c, 0)),
+            "empirical_kfr": float(metrics.get("per_class_kfr", {}).get(c, 0.0)),
+            "coverage": float(metrics.get("per_class_coverage", {}).get(c, 1.0)),
+            "closed_f1": float(class_wise_f1[c]) if c < len(class_wise_f1) else 0.0,
+            "pairwise_auroc": float(pairwise_auroc_raw.get(c, 0.0)),
+        }
+        for c, prof in server.global_profiles.items()
+    }
+
+    kfr_val = metrics.get("kfr", 0.0) * 100
+    oscr_val = metrics.get("oscr", 0.0) * 100
     print(
-        f"\n    [OPEN-SET EVALUATION RESULTS]\n"
-        f"      * Zero-Day AUROC:       {metrics.get('auroc', 0.0) * 100:.2f}%\n"
-        f"      * Zero-Day FPR@95:      {metrics.get('fpr95', 0.0) * 100:.2f}%\n"
-        f"      * Zero-Day Recall:      {metrics.get('unknown_recall', 0.0) * 100:.2f}%\n"
-        f"      * Known Test Acc (NN):  {metrics_nn['accuracy'] * 100:.2f}% (F1: {metrics_nn['macro_f1'] * 100:.2f}%)\n"
-        f"      * Known Test Acc (Maha):{closed_metrics['accuracy'] * 100:.2f}% (F1: {closed_metrics['macro_f1'] * 100:.2f}%\n",
+        f"\n    [OPEN-SET EVALUATION RESULTS (Section 5 / Table 4 Aligned)]\n"
+        f"      * Zero-Day AUROC (Raw / Norm):  {metrics.get('auroc', 0.0) * 100:.2f}% / {metrics.get('auroc_normalized', 0.0) * 100:.2f}%\n"
+        f"      * Open-Set OSCR:                {oscr_val:.2f}%\n"
+        f"      * Zero-Day FPR@95:              {metrics.get('fpr95', 0.0) * 100:.2f}%\n"
+        f"      * Conformal KFR:                {kfr_val:.2f}% (Nominal bound <= {config.osr.conformal_alpha * 100:.1f}%)\n"
+        f"      * Zero-Day Recall:              {metrics.get('unknown_recall', 0.0) * 100:.2f}% (at alpha={config.osr.conformal_alpha})\n"
+        f"      * Known Test Acc (NN Head):     {metrics_nn['accuracy'] * 100:.2f}% (Macro-F1: {metrics_nn['macro_f1'] * 100:.2f}%)\n"
+        f"      * Known Test Acc (Maha Edge):   {closed_metrics['accuracy'] * 100:.2f}% (Macro-F1: {closed_metrics['macro_f1'] * 100:.2f}%)\n"
+        f"      * Score Separation Margin:      Known: {metrics['score_stats']['raw_known_mean']:.2f} +/- {metrics['score_stats']['raw_known_std']:.2f} | "
+        f"Unknown: {metrics['score_stats']['raw_unknown_mean']:.2f} +/- {metrics['score_stats']['raw_unknown_std']:.2f} (Delta={metrics['score_stats']['separation_margin_raw']:.2f})\n",
         flush=True,
     )
+
+    fot_mask = (y_open_true == num_known)
+    n_fot = int(fot_mask.sum())
+    if n_fot > 0:
+        fot_preds = det["predictions"][fot_mask]
+        fot_rej = int(np.sum(fot_preds == num_known))
+        print(f"    [ZERO-DAY LEAKAGE & ROBUSTNESS AUDIT]")
+        print(f"      * Total Sequestered Zero-Day Attacks: {n_fot}")
+        print(f"      * Correctly Rejected as Unknown (C+1): {fot_rej} ({fot_rej / n_fot * 100:.2f}%)")
+        for c_idx in range(num_known):
+            swallowed_c = int(np.sum(fot_preds == c_idx))
+            print(f"      * Swallowed by Known Class {c_idx}:    {swallowed_c} ({swallowed_c / n_fot * 100:.2f}%)")
+        print("", flush=True)
+
+    cal_scores = getattr(server, "cal_scores_per_class", None)
+    if cal_scores is not None and "dist_matrix" in det:
+        sweep_results = evaluate_conformal_sensitivity_sweep(
+            cal_scores_per_class=cal_scores,
+            test_dist_matrix=det["dist_matrix"],
+            test_labels=y_open_true,
+            num_known_classes=num_known,
+            alphas=[0.03, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20],
+        )
+        metrics["conformal_sensitivity_sweep"] = sweep_results
+
+        print("    [CONFORMAL SENSITIVITY SWEEP (Section 5.4 / Operating Characteristic Curve)]")
+        print(f"    {'Alpha':<6} | {'Nominal Cov':<11} | {'Empirical Cov':<13} | {'KFR (<=alpha)':<13} | {'Zero-Day Rec':<12} | {'Precision':<10} | {'FoT F1':<8} | {'Status':<10}")
+        print("    " + "-" * 95)
+        for row in sweep_results:
+            print(f"    {row['alpha']:<6.2f} | {row['nominal_coverage']*100:<10.1f}% | {row['empirical_coverage']*100:<12.2f}% | {row['empirical_kfr']*100:<12.2f}% | {row['zero_day_recall']*100:<11.2f}% | {row['zero_day_precision']*100:<9.2f}% | {row['zero_day_f1']*100:<7.2f}% | {row['status']:<10}")
+        print("    " + "-" * 95 + "\n", flush=True)
 
     metrics["round_history"] = round_history
     metrics["phase1_wall_time_sec"] = float(t_phase1)

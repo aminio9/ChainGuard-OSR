@@ -156,15 +156,21 @@ class FedProtoBaseline(BaseBaseline):
         avg_loss = total_loss / max(1, active_clients)
         return {"round": round_idx, "train_loss": avg_loss}
 
-    def calibrate(self, cal_dataset: FlowDataset, alpha: float = 0.05) -> float:
-        """Calibrate rejection threshold using minimum distance to prototypes."""
+    def calibrate(self, cal_dataset: FlowDataset, alpha: float = 0.05, recalibrate_prototypes: bool = True) -> float:
+        """Calibrate rejection threshold using minimum distance to prototypes.
+        
+        If recalibrate_prototypes is True, prototypes are aligned with the global
+        averaged model representation space using calibration samples.
+        """
         self.model.eval()
         x_cal = cal_dataset.features.to(self.device)
         with torch.no_grad():
             _, z_cal = self.model(x_cal)
             for c in range(self.num_classes):
-                if torch.all(self.global_prototypes[c] == 0):
-                    idx_c = torch.where(cal_dataset.labels == c)[0]
+                idx_c = torch.where(cal_dataset.labels == c)[0]
+                if recalibrate_prototypes and len(idx_c) > 0:
+                    self.global_prototypes[c] = z_cal[idx_c].mean(dim=0)
+                elif torch.all(self.global_prototypes[c] == 0):
                     if len(idx_c) > 0:
                         self.global_prototypes[c] = z_cal[idx_c].mean(dim=0)
                     elif hasattr(self.model.classifier, "weight_matrix"):

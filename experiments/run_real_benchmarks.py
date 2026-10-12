@@ -40,7 +40,7 @@ from src.metrics.osr_metrics import compute_osr_metrics
 def run_benchmark_trial(
     dataset_name: str,
     rounds: int = 3,
-    samples_per_class: Optional[int] = None,
+    samples_per_class: Optional[Any] = None,
     beta_dirichlet: float = 0.5,
     config_path: str = "configs/default.yaml",
     seed: Optional[int] = None,
@@ -48,12 +48,23 @@ def run_benchmark_trial(
 ) -> Dict[str, float]:
     """Execute complete 3-phase training and closed/open-set evaluation on a real benchmark."""
     logger = setup_logger(name=f"bench_{dataset_name}")
-    logger.info(f"Loading real benchmark dataset: {dataset_name.upper()} (samples_per_class={samples_per_class})...")
+
+    eff_spc = samples_per_class
+    if isinstance(samples_per_class, dict):
+        eff_spc = samples_per_class.get(dataset_name, None)
+
+    if dataset_name == "cic_ids2017" and eff_spc is None:
+        eff_spc = 2000
+        logger.info(f"Applying memory-safe default samples_per_class={eff_spc} for {dataset_name.upper()} to prevent Colab OOM.")
+    elif eff_spc == -1:
+        eff_spc = None
+
+    logger.info(f"Loading real benchmark dataset: {dataset_name.upper()} (samples_per_class={eff_spc})...")
 
     dataset, meta = load_benchmark_dataset(
         dataset_name=dataset_name,
         data_dir="data/raw",
-        samples_per_class=samples_per_class,
+        samples_per_class=eff_spc,
     )
 
     in_features = meta["in_features"]
@@ -282,7 +293,7 @@ def run_all_four_benchmarks(
 def run_multi_dataset_benchmark(
     datasets: Optional[List[str]] = None,
     rounds: int = 3,
-    samples_per_class: Optional[int] = None,
+    samples_per_class: Optional[Any] = None,
     beta_dirichlet: float = 0.5,
     output_dir: str = "results/real_benchmarks",
     seed: Optional[int] = None,

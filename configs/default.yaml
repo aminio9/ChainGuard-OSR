@@ -23,9 +23,10 @@ federated:
   num_rounds: 30                       # Communication rounds
   local_epochs: 2                      # E = 2 local epochs per round (Section 5.3)
   batch_size: 64                       # B_s = 64 mini-batch size (Section 5.3)
-  num_blocks: 4                        # B = 4 diagonal sub-blocks (Section 4.3)
-  block_dim: 16                        # d_b = 16 sub-block dimension (64 = 4 * 16)
-  tikhonov_eps: 0.001                  # Tikhonov stabilizer epsilon_v = 1e-3
+  num_blocks: 1                        # B = 1 full covariance (or B = 2 for lightweight edge mode)
+  block_dim: 64                        # d_b = 64 (or 32 for Block-2)
+  tikhonov_eps: 0.0001                 # Tikhonov stabilizer epsilon_v = 1e-4
+  shrinkage_method: "oas"              # Server-Side OAS Shrinkage (Chen et al. 2010)
   partition:
     strategy: "iid"                    # "iid" or "dirichlet"
     beta_dirichlet: 0.5                # Non-IID Dirichlet parameter
@@ -34,11 +35,11 @@ model:
   architecture: "vib_network"
   in_features: 31
   latent_dim: 64                       # d_z = 64 bottleneck dimension
-  hidden_dim: [512, 256, 128]          # MLP backbone: 512 -> 256 -> 128 (Section 5.3)
+  hidden_dim: [256, 128]               # High-capacity MLP backbone: 256 -> 128
   dropout: 0.1
-  use_batchnorm: false
-  use_layernorm: true
-  activation: "gelu"
+  use_batchnorm: true
+  use_layernorm: false
+  activation: "relu"
   stochastic_encoder: true
 
 optimization:
@@ -49,7 +50,7 @@ optimization:
   clip_grad_norm: 1.0                  # Gradient clipping at 1.0 (Section 5.3)
 
 loss:
-  tau_bla: 1.0                         # Logit-adjusted margin temperature tau (Section 4.2.1)
+  tau_bla: 1.0                         # Balanced logit-adjusted margin (Section 4.2.1, L_BLA)
   laplace_eps: 0.1                     # Laplace smoothing for local priors (Section 4.2.1)
   lambda_vib: 0.01                     # VIB KL penalty weight (Section 4.2.2)
   beta_cb: 0.999                       # Deprecated fallback
@@ -58,6 +59,12 @@ loss:
 
 osr:
   method: "block_mahalanobis_conformal"
+  metric_type: "mahalanobis"            # OAS Mahalanobis (Theorem 1: Law of Total Variance)
   conformal_alpha: 0.05                # 95% guaranteed coverage bound (alpha = 0.05)
-  num_blocks: 4
-  block_dim: 16
+  num_blocks: 1                        # Primary: Full Covariance (B=1, d_b=64)
+  block_dim: 64
+  normalize_features: false            # Preserve full 64-D anisotropic covariance structure
+  shrinkage_method: "oas"
+  use_multi_prototype: true            # Macro-Prototype Profiling (AEGIS-Net / MPHIL)
+  num_prototypes_normal: 4             # M_0 = 4 macro-prototypes for multi-modal normal traffic
+  num_prototypes_attack: 1             # M_c = 1 prototype for known attack categories

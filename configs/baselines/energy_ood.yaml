@@ -1,0 +1,12 @@
+baseline_name: "energy_ood"
+federated_config: "configs/federated/fedavg.yaml"
+model_config: "configs/models/baseline_mlp.yaml"
+osr_method: "energy_ood"
+energy_temperature: 1.0
+loss:
+  tau_bla: 0.0
+  lambda_vib: 0.0
+  beta_cb: 0.0
+  focal_gamma: 0.0
+  lambda_anchor: 0.0
+  primal_dual_rho: 0.0

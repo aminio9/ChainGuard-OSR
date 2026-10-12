@@ -54,6 +54,7 @@ def _run_method_round_curves(
     curve_rows = []
     comm_rows = []
     dyn_rows = []
+    server = None
 
     if method_name in ("FedAvg", "FedProx"):
         client_datasets = [

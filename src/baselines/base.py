@@ -28,6 +28,7 @@ from src.metrics.osr_metrics import (
     compute_roc_curve_points,
 )
 from src.osr.conformal import compute_finite_sample_quantile
+from src.osr.weibull_evt import WeibullEVTFitter, compute_evt_probabilities
 
 
 def create_baseline_optimizer(
@@ -265,7 +266,7 @@ class BaseBaseline(ABC):
                         pooled_cov += torch.matmul(diff.t(), diff)
                     else:
                         self._unified_means[c] = torch.zeros(z_cal.size(1), device=self.device)
-                pooled_cov = pooled_cov / max(1.0, float(len(y_cal))) + 1e-4 * torch.eye(z_cal.size(1), device=self.device)
+                pooled_cov = pooled_cov / max(1.0, float(len(y_cal))) + 1e-4 * torch.eye(z_cal.size(1)).to(self.device)
                 self._unified_inv_cov = torch.linalg.pinv(pooled_cov)
                 dists = []
                 for c in range(self.num_classes):
@@ -273,6 +274,24 @@ class BaseBaseline(ABC):
                     sq = torch.sum(torch.matmul(d_c, self._unified_inv_cov) * d_c, dim=-1)
                     dists.append(torch.sqrt(torch.clamp(sq, min=0.0)))
                 cal_scores = torch.min(torch.stack(dists, dim=-1), dim=-1)[0].cpu().numpy()
+            elif scoring_method in ["openmax", "weibull_openmax"]:
+                self._openmax_prototypes = {}
+                for c in range(self.num_classes):
+                    idx_c = np.where(y_cal == c)[0]
+                    if len(idx_c) > 0:
+                        self._openmax_prototypes[c] = z_cal[idx_c].mean(dim=0)
+                    else:
+                        self._openmax_prototypes[c] = torch.zeros(z_cal.size(1), device=self.device)
+                self._evt_fitter = WeibullEVTFitter(tail_size=20)
+                self._evt_fitter.fit(z_cal, torch.tensor(y_cal, device=self.device), self._openmax_prototypes)
+                evt_probs = compute_evt_probabilities(
+                    z=z_cal,
+                    logits=logits_cal,
+                    prototypes=self._openmax_prototypes,
+                    weibull_models=self._evt_fitter.weibull_models,
+                    alpha_rank=min(3, self.num_classes),
+                )
+                cal_scores = evt_probs[:, 0].cpu().numpy()
             else:
                 raise ValueError(f"Unknown unified scoring_method '{scoring_method}'")
 
@@ -323,6 +342,17 @@ class BaseBaseline(ABC):
                 min_d, cand_t = torch.min(dist_mat, dim=-1)
                 anomaly_scores = min_d.cpu().numpy()
                 cand_classes = cand_t.cpu().numpy()
+            elif scoring_method in ["openmax", "weibull_openmax"]:
+                evt_probs = compute_evt_probabilities(
+                    z=z,
+                    logits=logits,
+                    prototypes=self._openmax_prototypes,
+                    weibull_models=self._evt_fitter.weibull_models,
+                    alpha_rank=min(3, self.num_classes),
+                )
+                anomaly_scores = evt_probs[:, 0].cpu().numpy()
+                known_probs = evt_probs[:, 1:].cpu().numpy()
+                cand_classes = np.argmax(known_probs, axis=-1)
             else:
                 raise ValueError(f"Unknown unified scoring_method '{scoring_method}'")
 

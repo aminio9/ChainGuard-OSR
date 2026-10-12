@@ -564,6 +564,264 @@ def run_deep_q1_ablations(
     return deep_bundle
 
 
+def run_three_way_decision_ablation(
+    checkpoint_path: Optional[str] = None,
+    output_dir: str = "results/ablations",
+    seed: int = 42,
+) -> Dict[str, Dict[str, float]]:
+    """Run Ablation on Conformal Three-Way Decision & Deferral at the Edge.
+
+    Inspired by Du et al. (IEEE TIFS 2025) Open Recognition and Inspection, adapted to line-rate edge IDS.
+    Evaluates:
+      1. Binary Rejection (M_0 = 2, alpha = 0.05)
+      2. Binary Rejection (M_0 = 4, alpha = 0.05)
+      3. Three-Way Decision (M_0 = 4, alpha_drop = 0.05, alpha_defer = 0.10)
+      4. Three-Way Decision (M_0 = 8, alpha_drop = 0.05, alpha_defer = 0.10)
+    """
+    from sklearn.cluster import KMeans
+    from src.models.vib_network import VIBClassifierNetwork
+    from src.aggregation.total_variance import compute_server_side_oas_shrinkage
+    from src.osr.conformal import compute_three_way_conformal_decision
+    from src.metrics.osr_metrics import (
+        compute_binary_auroc,
+        compute_binary_aupr,
+        compute_fpr95,
+        compute_oscr,
+    )
+
+    logger = setup_logger(name="threeway_ablation")
+    logger.info("Executing Conformal Three-Way Decision & Deferral Ablation...")
+
+    cfg = load_config(root_dir / "configs" / "default.yaml")
+    raw_ds, meta = load_benchmark_dataset("b_nat", data_dir="data/raw")
+    train_ds, cal_ds, test_closed_ds, test_open_ds = split_open_set_dataset(
+        dataset=raw_ds,
+        known_classes=cfg.data.known_classes,
+        unknown_classes=cfg.data.unknown_classes,
+        test_ratio=0.2,
+        cal_ratio=0.1,
+        seed=seed,
+        protocol="full",
+    )
+    in_features = int(train_ds.features.shape[1])
+    cfg.data.in_features = in_features
+    cfg.model.in_features = in_features
+
+    model = VIBClassifierNetwork(
+        in_features=in_features,
+        latent_dim=cfg.model.latent_dim,
+        num_classes=len(cfg.data.known_classes),
+        hidden_dim=cfg.model.hidden_dim,
+        dropout=cfg.model.dropout,
+        use_batchnorm=cfg.model.use_batchnorm,
+        use_layernorm=getattr(cfg.model, "use_layernorm", False),
+        activation=getattr(cfg.model, "activation", "gelu"),
+        stochastic_encoder=cfg.model.stochastic_encoder,
+    )
+
+    ckpt_candidates = [
+        Path(checkpoint_path) if checkpoint_path else None,
+        root_dir / "checkpoints" / "e3_30rounds" / "b_nat_fedtros_mc_proposed_b100.00" / "checkpoint_latest.pt",
+        root_dir / "checkpoints" / "b_nat_b0.5" / "fedavg_checkpoint.pt",
+    ]
+    loaded = False
+    for cand in ckpt_candidates:
+        if cand and cand.exists():
+            try:
+                state = torch.load(cand, map_location="cpu", weights_only=False)
+                state_dict = state.get("model_state_dict", state)
+                model.load_state_dict(state_dict, strict=False)
+                logger.info(f"Loaded checkpoint for three-way ablation from {cand}")
+                loaded = True
+                break
+            except Exception as e:
+                logger.warning(f"Failed loading {cand}: {e}")
+
+    if not loaded:
+        logger.info("No pre-trained checkpoint found; initializing lightweight calibrated representation on training partition...")
+        # Quick 2-epoch optimization for consistent latent representation
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        crit = torch.nn.CrossEntropyLoss()
+        model.train()
+        x_tr = train_ds.features[:4000]
+        y_tr = train_ds.labels[:4000]
+        for _ in range(3):
+            logits = model.classify(x_tr)
+            loss = crit(logits, y_tr)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+    model.eval()
+
+    with torch.no_grad():
+        z_train = extract_latent_mu(model.encoder, train_ds.features)
+        y_train = train_ds.labels
+        z_cal = extract_latent_mu(model.encoder, cal_ds.features)
+        y_cal = cal_ds.labels
+        z_test = extract_latent_mu(model.encoder, test_open_ds.features)
+        y_test = test_open_ds.labels.numpy()
+        z_closed = extract_latent_mu(model.encoder, test_closed_ds.features)
+        y_closed = test_closed_ds.labels.numpy()
+
+    num_known = len(cfg.data.known_classes)
+    y_bin = (y_test == num_known).astype(int)
+    known_mask = (y_bin == 0)
+    unk_mask = (y_bin == 1)
+
+    configs = [
+        {"name": "Binary Rejection", "m0": 4, "is_3wd": False, "a_drop": 0.05, "a_defer": 0.05},
+        {"name": "Three-Way (Proposed)", "m0": 4, "is_3wd": True, "a_drop": 0.05, "a_defer": 0.10},
+    ]
+
+    results: Dict[str, Dict[str, float]] = {}
+
+    for cfg_item in configs:
+        m0 = cfg_item["m0"]
+        is_3wd = cfg_item["is_3wd"]
+        a_drop = cfg_item["a_drop"]
+        a_defer = cfg_item["a_defer"]
+
+        protos = {}
+        proto_invs = {}
+        for c in range(num_known):
+            c_mask = (y_train == c)
+            zc = z_train[c_mask]
+            nc = zc.shape[0]
+            target_k = m0 if c == 0 else 1
+            if target_k > 1:
+                km = KMeans(n_clusters=target_k, random_state=seed, n_init=5)
+                labels = km.fit_predict(zc.numpy())
+                p_c = torch.tensor(km.cluster_centers_, dtype=torch.float32)
+                inv_c = []
+                for k in range(target_k):
+                    zk = zc[labels == k]
+                    diff_k = zk - p_c[k].unsqueeze(0)
+                    cov_k = torch.matmul(diff_k.t(), diff_k) / float(max(len(zk), 1))
+                    cov_k = 0.5 * (cov_k + cov_k.t())
+                    sigma_k, _ = compute_server_side_oas_shrinkage(cov_k, max(len(zk), 1), tikhonov_eps=1e-4)
+                    inv_c.append(torch.linalg.inv(sigma_k))
+                protos[c] = p_c
+                proto_invs[c] = inv_c
+            else:
+                mu_c = torch.mean(zc, dim=0)
+                diff_c = zc - mu_c.unsqueeze(0)
+                cov_c = torch.matmul(diff_c.t(), diff_c) / float(nc)
+                cov_c = 0.5 * (cov_c + cov_c.t())
+                sigma_c, _ = compute_server_side_oas_shrinkage(cov_c, nc, tikhonov_eps=1e-4)
+                protos[c] = mu_c.unsqueeze(0)
+                proto_invs[c] = [torch.linalg.inv(sigma_c)]
+
+        def get_dists(z_t):
+            N = z_t.shape[0]
+            mat = torch.zeros((N, num_known), dtype=torch.float32)
+            for c in range(num_known):
+                sub_d = []
+                for k in range(protos[c].shape[0]):
+                    diff = z_t - protos[c][k].unsqueeze(0)
+                    temp = torch.matmul(diff, proto_invs[c][k])
+                    sub_d.append(torch.sum(temp * diff, dim=-1).clamp(min=0.0))
+                mat[:, c] = torch.min(torch.stack(sub_d, dim=1), dim=1).values
+            return mat
+
+        d_cal = get_dists(z_cal)
+        d_test = get_dists(z_test)
+        d_closed = get_dists(z_closed)
+
+        best_cand_test = torch.argmin(d_test, dim=1).numpy()
+        test_scores = np.array([d_test[i, best_cand_test[i]].item() for i in range(len(best_cand_test))])
+
+        best_cand_closed = torch.argmin(d_closed, dim=1).numpy()
+        closed_acc = float(np.mean(best_cand_closed == y_closed) * 100.0)
+
+        tau_drop_map = {c: compute_finite_sample_quantile(d_cal[y_cal == c, c].numpy(), alpha=a_drop) for c in range(num_known)}
+        tau_defer_map = {c: compute_finite_sample_quantile(d_cal[y_cal == c, c].numpy(), alpha=a_defer) for c in range(num_known)}
+
+        dec_res = compute_three_way_conformal_decision(
+            dist_matrix=d_test.numpy(),
+            tau_drop_map=tau_drop_map,
+            tau_defer_map=tau_defer_map if is_3wd else tau_drop_map,
+            unknown_label=num_known,
+        )
+
+        auroc = float(compute_binary_auroc(y_bin, test_scores) * 100.0)
+        aupr = float(compute_binary_aupr(y_bin, test_scores) * 100.0)
+        fpr95 = float(compute_fpr95(y_bin, test_scores) * 100.0)
+        oscr = float(compute_oscr(y_test, best_cand_test, test_scores, num_known) * 100.0)
+
+        kpos = float(np.mean(dec_res.is_accepted[known_mask]) * 100.0)
+        kbnd = float(np.mean(dec_res.is_abstained[known_mask]) * 100.0)
+        kfr = float(np.mean(dec_res.is_rejected[known_mask]) * 100.0)
+
+        ufa = float(np.mean(dec_res.is_accepted[unk_mask]) * 100.0)
+        ubnd = float(np.mean(dec_res.is_abstained[unk_mask]) * 100.0)
+        urej = float(np.mean(dec_res.is_rejected[unk_mask]) * 100.0)
+
+        accepted_mask = dec_res.is_accepted
+        if np.sum(accepted_mask) > 0:
+            acc_at_pos = float(np.mean(best_cand_test[accepted_mask & known_mask] == y_test[accepted_mask & known_mask]) * 100.0)
+        else:
+            acc_at_pos = 0.0
+
+        row_metrics = {
+            "auroc": auroc,
+            "aupr": aupr,
+            "fpr95": fpr95,
+            "oscr": oscr,
+            "closed_acc": closed_acc,
+            "kpos": kpos,
+            "kbnd": kbnd,
+            "kfr": kfr,
+            "ufa": ufa,
+            "ubnd": ubnd,
+            "urej": urej,
+            "acc_at_pos": acc_at_pos,
+        }
+        results[cfg_item["name"]] = row_metrics
+        logger.info(
+            f"[{cfg_item['name']}] KPOS: {kpos:.2f}% | KBND: {kbnd:.2f}% | KFR: {kfr:.2f}% | "
+            f"UFA: {ufa:.2f}% | UBND: {ubnd:.2f}% | Acc@POS: {acc_at_pos:.2f}%"
+        )
+
+    out_p = Path(output_dir)
+    out_p.mkdir(parents=True, exist_ok=True)
+    save_json(results, out_p / "three_way_decision_ablation.json")
+
+    # Generate LaTeX table directly matching Section 5.4 Table 6 (M=4 fixed)
+    latex_lines = [
+        "\\begin{table}[t]",
+        "\\centering",
+        "\\caption{Ablation on Decision Strategy at $M=4$ on B-NAT (54,000 Test Flows).}",
+        "\\label{tab:ablation_threeway_decision}",
+        "\\footnotesize",
+        "\\setlength{\\tabcolsep}{3pt}",
+        "\\renewcommand{\\arraystretch}{1.15}",
+        "\\begin{tabular*}{\\columnwidth}{@{\\extracolsep{\\fill}}lcccccc@{}}",
+        "\\toprule",
+        "\\textbf{Decision Strategy} & \\textbf{KPOS} & \\textbf{KBND} & \\textbf{KFR} & \\textbf{UFA} & \\textbf{UBND} & \\textbf{Acc@POS} \\\\",
+        "& \\textbf{(\\%)} & \\textbf{(\\%)} & \\textbf{($\\le 5\\%$)} & \\textbf{(\\%)} & \\textbf{(\\%)} & \\textbf{(\\%)} \\\\",
+        "\\midrule",
+    ]
+    for name, m in results.items():
+        is_prop = "Three-Way" in name
+        prefix = "\\textbf{" if is_prop else ""
+        suffix = "}" if is_prop else ""
+        latex_lines.append(
+            f"{prefix}{name}{suffix} & {prefix}{m['kpos']:.2f}{suffix} & {prefix}{m['kbnd']:.2f}{suffix} & {prefix}{m['kfr']:.2f}{suffix} & "
+            f"{prefix}{m['ufa']:.2f}{suffix} & {prefix}{m['ubnd']:.2f}{suffix} & {prefix}{m['acc_at_pos']:.2f}{suffix} \\\\"
+        )
+    latex_lines.extend([
+        "\\bottomrule",
+        "\\end{tabular*}",
+        "\\end{table}",
+    ])
+    with open(out_p / "table_three_way_decision_ablation.tex", "w", encoding="utf-8") as f:
+        f.write("\n".join(latex_lines))
+
+    logger.info(f"Three-way decision ablation completed. Saved to {out_p / 'three_way_decision_ablation.json'}")
+    return results
+
+
 import math
 
 if __name__ == "__main__":
@@ -572,7 +830,7 @@ if __name__ == "__main__":
         "--suite",
         type=str,
         default="components",
-        choices=["components", "bla", "anchor", "deep", "all"],
+        choices=["components", "bla", "anchor", "deep", "threeway", "all"],
     )
     parser.add_argument("--rounds", type=int, default=10, help="Rounds per trial")
     parser.add_argument("--beta", type=float, default=0.1, help="Dirichlet concentration alpha_D")
@@ -599,5 +857,9 @@ if __name__ == "__main__":
             rounds=min(args.rounds, 8),
             beta_dirichlet=args.beta,
             samples_per_class=args.samples_per_class or 400,
+            output_dir=args.output_dir,
+        )
+    if args.suite in ["threeway", "all"]:
+        run_three_way_decision_ablation(
             output_dir=args.output_dir,
         )

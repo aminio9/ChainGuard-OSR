@@ -1,9 +1,9 @@
 architecture: "vib_network"
 in_features: 34
 latent_dim: 64
-hidden_dim: [512, 256, 128]
+hidden_dim: [256, 128]
 dropout: 0.1
-use_batchnorm: false
-use_layernorm: true
-activation: "gelu"
+use_batchnorm: true
+use_layernorm: false
+activation: "relu"
 stochastic_encoder: true

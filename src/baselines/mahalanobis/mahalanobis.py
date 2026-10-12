@@ -93,7 +93,7 @@ class VanillaMahalanobisBaseline(BaseBaseline):
 
         # Normalize and regularize pooled covariance
         pooled_cov = pooled_cov / max(1.0, float(n_total))
-        pooled_cov += self.regularization * torch.eye(self.latent_dim, device=self.device)
+        pooled_cov += self.regularization * torch.eye(self.latent_dim, device="cpu").to(self.device)
         self.inv_cov = torch.linalg.pinv(pooled_cov)
 
         # 2. Compute minimum Mahalanobis distances on calibration set
