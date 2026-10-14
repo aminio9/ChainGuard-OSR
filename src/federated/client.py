@@ -299,6 +299,8 @@ class FederatedClient:
             target_m = m0 if c == 0 else mc_atk
             local_protos = None
             local_proto_counts = None
+            assigned_centers = mu_k_c.unsqueeze(0).expand(count, -1)  # Default: around local class mean
+
             if use_mp and target_m > 1:
                 k_actual = min(target_m, count)
                 if k_actual > 1:
@@ -310,19 +312,22 @@ class FederatedClient:
                     local_protos = torch.from_numpy(km.cluster_centers_).to(dtype=z_c.dtype).cpu()
                     counts_arr = np.bincount(km.labels_, minlength=k_actual)
                     local_proto_counts = [int(x) for x in counts_arr]
+                    # Compute intra-cluster deviations from assigned local prototype center (FedProto / One-Shot Clustering)
+                    assigned_centers = local_protos[km.labels_].to(device=self.device)
                 else:
                     local_protos = mu_k_c.unsqueeze(0).cpu()
                     local_proto_counts = [count]
 
             # Section 4.3, Eq. eq:local_block_cov: Sub-block covariances Sigma_{k, c, G_b}
+            # Intra-cluster local covariance: deviations around assigned prototype centers
             block_covs: List[torch.Tensor] = []
             for b in range(num_blocks):
                 start = b * block_dim
                 end = start + block_dim
                 z_c_b = z_c[:, start:end]  # (count, d_b)
-                mu_c_b = mu_k_c[start:end]  # (d_b,)
+                centers_b = assigned_centers[:, start:end]  # (count, d_b)
 
-                diff_b = z_c_b - mu_c_b.unsqueeze(0)  # (count, d_b)
+                diff_b = z_c_b - centers_b  # (count, d_b)
                 cov_b = torch.matmul(diff_b.t(), diff_b) / float(count)
                 block_covs.append(cov_b.cpu())
 

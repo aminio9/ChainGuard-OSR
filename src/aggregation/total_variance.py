@@ -444,22 +444,41 @@ def federated_align_and_average_prototypes(
     fallback_mean: Optional[torch.Tensor] = None,
     random_state: int = 42,
 ) -> torch.Tensor:
-    r"""Align and aggregate local client prototype centroids using bipartite matching (One-Shot Federated Clustering).
+    r"""Align and aggregate local client prototype centroids using Hungarian bipartite matching.
 
-    Preserves 100% client privacy: Nodes transmit ONLY local prototype centroids and cluster
-    sample counts (N_{k,c,m}). No raw latent vectors z leave any client.
+    Problem Addressed (Permutation Ambiguity / Label Switching):
+        Independent local k-means on non-IID client nodes generates arbitrary cluster index
+        permutations. For benign blockchain traffic with M_1 = 4 behavioral modes (handshake,
+        peer discovery, transaction propagation, block announcement), client k may assign mode 1
+        to index 0 while client k' assigns it to index 2. Naive slot-wise averaging blends distinct
+        operational regimes, corrupts global prototypes \bar{\mu}_{1,m}, and artificially inflates
+        the between-node dispersion term (\mu_{k,1,m} - \bar{\mu}_{1,m}) in the Law of Total Variance.
 
-    Mathematical Formulation (LaTeX Section 4.3):
-        \bar{\mu}_{c, m} = \frac{\sum_{k \in \mathcal{K}_c} N_{k, c, \pi_k(m)} \mu_{k, c, \pi_k(m)}}{\sum_{k \in \mathcal{K}_c} N_{k, c, \pi_k(m)}}
-        where \pi_k is the optimal bipartite matching permutation between client k's local cluster
-        centers and the reference global prototype slots.
+    Algorithmic Resolution (Hungarian Algorithm / Linear Bipartite Matching):
+        1. Establish reference template R in R^{M_1 x d_z} across local candidate centers.
+        2. Construct pairwise Euclidean distance cost matrix C_{i, j} = ||R_i - \mu_{k, 1, j}||_2^2.
+        3. Solve optimal one-to-one assignment \pi_k = \arg\min_\pi \sum_{m=1}^{M_1} ||R_m - \mu_{k, 1, \pi(m)}||_2^2
+           using the Hungarian algorithm (scipy.optimize.linear_sum_assignment) with complexity
+           O(M_1^3) = 4^3 = 64 operations (sub-millisecond execution on the coordinator).
+        4. Reconstruct sample-weighted global prototypes:
+               \bar{\mu}_{1, m} = \frac{\sum_{k \in \mathcal{K}_1} N_{k, 1, \pi_k(m)} \mu_{k, 1, \pi_k(m)}}{\sum_{k \in \mathcal{K}_1} N_{k, 1, \pi_k(m)}}
+
+    Two-Subscript Law & Shared Covariance:
+        All M_1 = 4 prototypes share a single pooled block-diagonal precision matrix
+        \tilde{\Sigma}_{1,b}^{-1} aggregated via the Law of Total Variance from intra-cluster
+        deviations. Notation is strictly bounded to two subscripts (\bar{\mu}_{1,m} and
+        \tilde{\Sigma}_{1,b}^{-1}), eliminating three-subscript matrix proliferation.
+
+    Privacy Preservation (Zero Raw Data Leakage):
+        Nodes transmit ONLY 4 local prototype centroid vectors and cluster scalar counts N_{k,1,m}.
+        No raw feature embeddings z leave any client.
 
     Args:
-        local_prototypes_list: List of (local_protos, local_counts) from active clients,
-            where local_protos is (M_{k,c}, d_z) and local_counts is list of length M_{k,c}.
+        local_prototypes_list: List of (local_protos, local_counts) tuples from active clients.
+            local_protos has shape (M_{k,c}, d_z); local_counts has length M_{k,c}.
         target_num_prototypes: Desired number of global prototypes M_c (e.g., M_1 = 4).
-        normalize_features: If True, projects aggregated prototypes onto unit sphere S^{d-1}.
-        fallback_mean: Global centroid mu_c to fallback to if no valid local prototypes exist.
+        normalize_features: If True, projects aggregated prototypes onto unit hypersphere S^{d-1}.
+        fallback_mean: Global centroid mu_c to fall back to if no valid local prototypes exist.
         random_state: Seed for deterministic execution.
 
     Returns:
