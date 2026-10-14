@@ -128,8 +128,45 @@ def test_wire_speed_edge_detector_with_multi_prototypes():
     assert not res.is_unknown
 
 
+def test_federated_align_and_average_prototypes_privacy():
+    """Verify privacy-preserving One-Shot Federated Clustering via bipartite alignment."""
+    from src.aggregation.total_variance import federated_align_and_average_prototypes
+
+    d_z = 16
+    m_target = 4
+
+    # 3 clients each submitting 4 local prototype centers and counts
+    c1_protos = torch.randn(4, d_z)
+    c1_counts = [10, 20, 15, 30]
+
+    c2_protos = torch.randn(4, d_z)
+    c2_counts = [12, 18, 14, 28]
+
+    c3_protos = torch.randn(4, d_z)
+    c3_counts = [8, 22, 16, 25]
+
+    submissions = [
+        (c1_protos, c1_counts),
+        (c2_protos, c2_counts),
+        (c3_protos, c3_counts),
+    ]
+
+    global_protos = federated_align_and_average_prototypes(
+        local_prototypes_list=submissions,
+        target_num_prototypes=m_target,
+        normalize_features=True,
+    )
+
+    assert global_protos.shape == (m_target, d_z)
+    # Check L2 normalization on unit sphere
+    norms = torch.norm(global_protos, p=2, dim=-1)
+    for n in norms:
+        assert math.isclose(n.item(), 1.0, abs_tol=1e-5)
+
+
 if __name__ == "__main__":
     test_multi_prototype_backward_compatibility()
     test_multi_prototype_minimum_distance()
     test_wire_speed_edge_detector_with_multi_prototypes()
+    test_federated_align_and_average_prototypes_privacy()
     print("ALL MULTI-PROTOTYPE TESTS PASSED SUCCESSFULLY!")

@@ -119,7 +119,7 @@ class OSRConfig(BaseModel):
     normalize_features: bool = False
     shrinkage_method: str = "oas"
     use_multi_prototype: bool = True
-    num_prototypes_normal: int = 2
+    num_prototypes_normal: int = 4
     num_prototypes_attack: int = 1
     metric_type: str = "mahalanobis"
 

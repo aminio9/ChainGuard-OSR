@@ -20,6 +20,8 @@ class ClientClassMoment(NamedTuple):
     block_covs: List[torch.Tensor]  # B tensors of shape (d_b, d_b)
     cal_quantile: Optional[float] = None  # Local (1 - alpha) calibration quantile
     class_id: Optional[int] = None  # Known class index c in Y_K
+    local_prototypes: Optional[torch.Tensor] = None  # Local multi-prototype centroids of shape (M_c, d_z)
+    local_proto_counts: Optional[List[int]] = None  # Sample counts per local prototype cluster
 
 
 class GlobalClassProfile(NamedTuple):
@@ -433,4 +435,125 @@ def extract_spherical_class_prototypes_with_covs(
             proto_inv_block_covs.append(inv_blocks_m)
 
     return proto_centroids, proto_inv_block_covs
+
+
+def federated_align_and_average_prototypes(
+    local_prototypes_list: List[Tuple[torch.Tensor, List[int]]],
+    target_num_prototypes: int,
+    normalize_features: bool = False,
+    fallback_mean: Optional[torch.Tensor] = None,
+    random_state: int = 42,
+) -> torch.Tensor:
+    r"""Align and aggregate local client prototype centroids using bipartite matching (One-Shot Federated Clustering).
+
+    Preserves 100% client privacy: Nodes transmit ONLY local prototype centroids and cluster
+    sample counts (N_{k,c,m}). No raw latent vectors z leave any client.
+
+    Mathematical Formulation (LaTeX Section 4.3):
+        \bar{\mu}_{c, m} = \frac{\sum_{k \in \mathcal{K}_c} N_{k, c, \pi_k(m)} \mu_{k, c, \pi_k(m)}}{\sum_{k \in \mathcal{K}_c} N_{k, c, \pi_k(m)}}
+        where \pi_k is the optimal bipartite matching permutation between client k's local cluster
+        centers and the reference global prototype slots.
+
+    Args:
+        local_prototypes_list: List of (local_protos, local_counts) from active clients,
+            where local_protos is (M_{k,c}, d_z) and local_counts is list of length M_{k,c}.
+        target_num_prototypes: Desired number of global prototypes M_c (e.g., M_1 = 4).
+        normalize_features: If True, projects aggregated prototypes onto unit sphere S^{d-1}.
+        fallback_mean: Global centroid mu_c to fallback to if no valid local prototypes exist.
+        random_state: Seed for deterministic execution.
+
+    Returns:
+        (M_c, d_z) Tensor of aligned and aggregated global prototypes.
+    """
+    import numpy as np
+    from scipy.optimize import linear_sum_assignment
+    from sklearn.cluster import KMeans
+
+    valid_subs = [
+        (p.cpu().to(torch.float32), (counts if counts is not None else [1] * p.size(0)))
+        for p, counts in local_prototypes_list
+        if p is not None and p.ndim == 2 and p.size(0) > 0
+    ]
+
+    if not valid_subs:
+        if fallback_mean is not None:
+            f_mean = fallback_mean.cpu().to(torch.float32)
+            if normalize_features:
+                f_mean = f_mean / torch.norm(f_mean, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+            return f_mean.unsqueeze(0).repeat(target_num_prototypes, 1)
+        return torch.zeros((target_num_prototypes, 64), dtype=torch.float32)
+
+    d_z = valid_subs[0][0].size(1)
+
+    if target_num_prototypes <= 1:
+        total_w = 0.0
+        sum_vec = torch.zeros(d_z, dtype=torch.float32)
+        for p, counts in valid_subs:
+            for i in range(p.size(0)):
+                w = float(counts[i]) if i < len(counts) else 1.0
+                sum_vec += w * p[i]
+                total_w += w
+        mean_p = sum_vec / max(total_w, 1e-8)
+        if normalize_features:
+            mean_p = mean_p / torch.norm(mean_p, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+        return mean_p.unsqueeze(0)
+
+    # Gather all candidate centers across clients
+    all_centers = []
+    all_weights = []
+    for p, counts in valid_subs:
+        for i in range(p.size(0)):
+            w = float(counts[i]) if i < len(counts) else 1.0
+            all_centers.append(p[i].numpy())
+            all_weights.append(w)
+
+    all_centers_np = np.asarray(all_centers, dtype=np.float32)
+    all_weights_np = np.asarray(all_weights, dtype=np.float32)
+
+    total_pool_size = len(all_centers_np)
+    k_actual = min(target_num_prototypes, total_pool_size)
+
+    # Establish reference anchor template R (k_actual, d_z)
+    if k_actual > 1:
+        km = KMeans(n_clusters=k_actual, random_state=random_state, n_init=5)
+        km.fit(all_centers_np, sample_weight=all_weights_np)
+        reference_R = torch.from_numpy(km.cluster_centers_).to(torch.float32)
+    else:
+        reference_R = torch.from_numpy(all_centers_np[0:1]).to(torch.float32)
+
+    # Bipartite matching alignment against reference template
+    slot_sums = torch.zeros((k_actual, d_z), dtype=torch.float32)
+    slot_weights = torch.zeros(k_actual, dtype=torch.float32)
+
+    ref_np = reference_R.numpy()
+
+    for p, counts in valid_subs:
+        p_np = p.numpy()
+        n_p = len(p_np)
+        # Compute cost matrix (k_actual x n_p)
+        diff = ref_np[:, np.newaxis, :] - p_np[np.newaxis, :, :]
+        cost_mat = np.sum(diff ** 2, axis=-1)  # (k_actual, n_p)
+
+        row_ind, col_ind = linear_sum_assignment(cost_mat)
+        for r_slot, c_idx in zip(row_ind, col_ind):
+            w = float(counts[c_idx]) if c_idx < len(counts) else 1.0
+            slot_sums[r_slot] += w * p[c_idx]
+            slot_weights[r_slot] += w
+
+    # Calculate weighted average per slot
+    aligned_prototypes = []
+    for s in range(k_actual):
+        if slot_weights[s].item() > 0:
+            proto_s = slot_sums[s] / slot_weights[s]
+        else:
+            proto_s = reference_R[s]
+        if normalize_features:
+            proto_s = proto_s / torch.norm(proto_s, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+        aligned_prototypes.append(proto_s)
+
+    # Pad if k_actual < target_num_prototypes
+    while len(aligned_prototypes) < target_num_prototypes:
+        aligned_prototypes.append(aligned_prototypes[-1].clone())
+
+    return torch.stack(aligned_prototypes[:target_num_prototypes], dim=0)
 

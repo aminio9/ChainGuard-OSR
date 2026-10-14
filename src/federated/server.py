@@ -239,46 +239,41 @@ class FederatedServer:
         # cal_dataset is reserved exclusively for Stage 3 conformal calibration — mixing them
         # would inflate empirical calibration coverage (prototypes fit to cal → small cal scores
         # → tight τ → over-rejection) and violate conformal validity.
+        # Multi-Prototype Hyperspherical Profiling (One-Shot Federated Clustering with Bipartite Matching)
+        # 100% Privacy Preserving: Nodes run local k-means and upload ONLY local prototype centroids and sample counts.
+        # No raw embeddings z leave any client. All M_c prototypes share the common aggregated total-variance block precision matrix.
         use_mp = getattr(self.config.osr, "use_multi_prototype", True)
         if use_mp:
-            from torch.utils.data import DataLoader
-            from src.aggregation.total_variance import extract_spherical_class_prototypes_with_covs
+            from src.aggregation.total_variance import federated_align_and_average_prototypes
 
-            m0 = getattr(self.config.osr, "num_prototypes_normal", 2)
+            m0 = getattr(self.config.osr, "num_prototypes_normal", 4)
             mc_atk = getattr(self.config.osr, "num_prototypes_attack", 1)
-            tik_eps = getattr(self.config.federated, "tikhonov_eps", 1e-4)
-
-            # Gather training-partition embeddings per class across all clients
-            train_feats_per_class: Dict[int, List[torch.Tensor]] = {
-                c: [] for c in self.global_profiles.keys()
-            }
-            with torch.no_grad():
-                for cl in self.clients:
-                    train_ds = getattr(cl, "dataset", None)
-                    if train_ds is None or len(train_ds) == 0:
-                        continue
-                    loader_cl = DataLoader(train_ds, batch_size=512, shuffle=False)
-                    for cl_x, cl_y in loader_cl:
-                        cl_x_dev = cl_x.to(self.device)
-                        cl_z = extract_latent_mu(self.global_model.encoder, cl_x_dev)
-                        for c in self.global_profiles.keys():
-                            c_mask = (cl_y == c)
-                            if int(c_mask.sum().item()) > 0:
-                                train_feats_per_class[c].append(cl_z[c_mask.to(cl_z.device)])
-
             norm_feat = getattr(self.config.osr, "normalize_features", False)
+
             for c in self.global_profiles.keys():
-                if train_feats_per_class[c]:
-                    all_c_train = torch.cat(train_feats_per_class[c], dim=0)
-                    M_target = m0 if c == 0 else mc_atk
-                    protos_c, proto_inv_covs_c = extract_spherical_class_prototypes_with_covs(
-                        all_c_train,
-                        num_prototypes=M_target,
-                        num_blocks=num_blocks,
-                        block_dim=block_dim,
-                        tikhonov_eps=tik_eps,
+                target_m = m0 if c == 0 else mc_atk
+                if target_m <= 1:
+                    continue
+
+                local_subs = []
+                for m_item in class_moments_map.get(c, []):
+                    if m_item.local_prototypes is not None:
+                        local_subs.append((m_item.local_prototypes, m_item.local_proto_counts or [m_item.sample_count]))
+
+                if local_subs:
+                    protos_c = federated_align_and_average_prototypes(
+                        local_prototypes_list=local_subs,
+                        target_num_prototypes=target_m,
                         normalize_features=norm_feat,
-                    )
+                        fallback_mean=self.global_profiles[c].mu,
+                    ).to(device=self.device)
+
+                    # All M_c prototypes share the common aggregated total-variance block precision matrix
+                    shared_inv_blocks = [
+                        b_mat.to(device=self.device) for b_mat in self.global_profiles[c].inv_block_covs
+                    ]
+                    proto_inv_covs_c = [shared_inv_blocks for _ in range(protos_c.size(0))]
+
                     self.global_profiles[c] = self.global_profiles[c]._replace(
                         prototypes=protos_c,
                         proto_inv_block_covs=proto_inv_covs_c,

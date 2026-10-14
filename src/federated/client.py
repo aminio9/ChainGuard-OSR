@@ -277,6 +277,10 @@ class FederatedClient:
             num_blocks = min(num_blocks, actual_latent)
             block_dim = actual_latent // num_blocks
 
+        use_mp = getattr(self.config.osr, "use_multi_prototype", True)
+        m0 = getattr(self.config.osr, "num_prototypes_normal", 4)
+        mc_atk = getattr(self.config.osr, "num_prototypes_attack", 1)
+
         moments_list: List[ClientClassMoment] = []
 
         for c in self.local_classes:
@@ -290,6 +294,25 @@ class FederatedClient:
 
             # Section 4.3, Eq. eq:local_mean: Local mean mu_{k,c} uploaded by k in K_c^{prof} (N_{k,c} >= N_min)
             mu_k_c = torch.mean(z_c, dim=0)  # Shape: (d_z,)
+
+            # Privacy-Preserving Local k-means for Multi-Prototype Classes (e.g., M_1 = 4 for normal class)
+            target_m = m0 if c == 0 else mc_atk
+            local_protos = None
+            local_proto_counts = None
+            if use_mp and target_m > 1:
+                k_actual = min(target_m, count)
+                if k_actual > 1:
+                    from sklearn.cluster import KMeans
+                    import numpy as np
+                    feat_np = z_c.cpu().numpy()
+                    km = KMeans(n_clusters=k_actual, random_state=42, n_init=3)
+                    km.fit(feat_np)
+                    local_protos = torch.from_numpy(km.cluster_centers_).to(dtype=z_c.dtype).cpu()
+                    counts_arr = np.bincount(km.labels_, minlength=k_actual)
+                    local_proto_counts = [int(x) for x in counts_arr]
+                else:
+                    local_protos = mu_k_c.unsqueeze(0).cpu()
+                    local_proto_counts = [count]
 
             # Section 4.3, Eq. eq:local_block_cov: Sub-block covariances Sigma_{k, c, G_b}
             block_covs: List[torch.Tensor] = []
@@ -311,6 +334,8 @@ class FederatedClient:
                     block_covs=block_covs,
                     cal_quantile=None,
                     class_id=c,
+                    local_prototypes=local_protos,
+                    local_proto_counts=local_proto_counts,
                 )
             )
 
