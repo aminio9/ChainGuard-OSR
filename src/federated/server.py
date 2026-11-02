@@ -147,8 +147,13 @@ class FederatedServer:
 
         avg_round_loss: Dict[str, float] = {}
         if round_losses:
+            total_samples = sum(n for _, n, _ in client_updates)
             for k in round_losses[0].keys():
-                avg_round_loss[k] = float(np.mean([entry[k] for entry in round_losses]))
+                if total_samples > 0:
+                    avg_round_loss[k] = float(sum(entry[k] * n for entry, (_, n, _) in zip(round_losses, client_updates)) / total_samples)
+                else:
+                    avg_round_loss[k] = float(np.mean([entry[k] for entry in round_losses]))
+                avg_round_loss[f"{k}_unweighted"] = float(np.mean([entry[k] for entry in round_losses]))
         avg_round_loss["lr_scheduled"] = lr_t
         avg_round_loss["round"] = int(t_zero_based + 1)
         self.round_history.append(dict(avg_round_loss))
