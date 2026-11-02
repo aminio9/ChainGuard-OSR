@@ -110,30 +110,71 @@ def test_hungarian_prototype_alignment_resolves_permutation_ambiguity():
         assert min_dist < 0.2, f"Mode {gt} was not recovered! Min distance: {min_dist}"
 
 
-def test_prototype_alignment_weighted_and_edge_cases():
-    """Verify weighted averaging and graceful fallback when local prototype submissions are sparse."""
-    from src.aggregation.total_variance import federated_align_and_average_prototypes
-
-    # Single client with 2 prototypes when 4 are requested
-    p1 = torch.tensor([[5.0, 0.0], [0.0, 5.0]])
-    c1 = [300, 100]  # Skewed sample counts
-
-    aligned = federated_align_and_average_prototypes(
-        local_prototypes_list=[(p1, c1)],
-        target_num_prototypes=2,
+def test_one_shot_federated_voronoi_multimodal_lotv():
+    """Verify LaTeX Algorithm 1 & Section 4.5.1:
+    One-Shot Federated K-Means reference center extraction, Voronoi partitioning (Eq. 4.8),
+    and multi-cluster LOTV with common within-cluster covariance.
+    """
+    from src.aggregation.total_variance import (
+        extract_one_shot_federated_reference_centers,
+        aggregate_total_variance_moments,
     )
-    assert aligned.shape == (2, 2)
-    # Check that aligned clusters match the input centers
-    assert torch.allclose(aligned[0], p1[0], atol=1e-4) or torch.allclose(aligned[0], p1[1], atol=1e-4)
 
-    # Empty submission with fallback mean
-    fallback = torch.tensor([1.0, 2.0])
-    aligned_fallback = federated_align_and_average_prototypes(
-        local_prototypes_list=[],
-        target_num_prototypes=3,
-        fallback_mean=fallback,
+    d_z = 64
+    num_blocks = 4
+    d_b = 16
+
+    # 4 distinct modes for normal traffic
+    c0 = torch.zeros(d_z); c0[:16] = 5.0
+    c1 = torch.zeros(d_z); c1[16:32] = 5.0
+    c2 = torch.zeros(d_z); c2[32:48] = 5.0
+    c3 = torch.zeros(d_z); c3[48:] = 5.0
+    ground_truth_centers = torch.stack([c0, c1, c2, c3], dim=0)
+
+    # Client 1 only has mode 0 and 1
+    # Client 2 only has mode 2 and 3
+    # Client 3 has all 4 modes
+    candidates = [
+        (torch.stack([c0 + 0.1, c1 - 0.1]), [100, 100]),
+        (torch.stack([c2 + 0.1, c3 - 0.1]), [120, 80]),
+        (torch.stack([c0 - 0.05, c1 + 0.05, c2 - 0.05, c3 + 0.05]), [50, 50, 50, 50]),
+    ]
+
+    ref_centers = extract_one_shot_federated_reference_centers(candidates, num_centers=4)
+    assert ref_centers.shape == (4, d_z)
+
+    # Voronoi partitioning moments: each client sends moments only for observed clusters
+    submissions = [
+        # Client 1: mode 0, mode 1
+        ClientClassMoment(client_id=1, sample_count=100, mu=c0 + 0.1, block_covs=[torch.eye(d_b) for _ in range(num_blocks)], class_id=0, cluster_id=0),
+        ClientClassMoment(client_id=1, sample_count=100, mu=c1 - 0.1, block_covs=[torch.eye(d_b) for _ in range(num_blocks)], class_id=0, cluster_id=1),
+        # Client 2: mode 2, mode 3
+        ClientClassMoment(client_id=2, sample_count=120, mu=c2 + 0.1, block_covs=[torch.eye(d_b) for _ in range(num_blocks)], class_id=0, cluster_id=2),
+        ClientClassMoment(client_id=2, sample_count=80, mu=c3 - 0.1, block_covs=[torch.eye(d_b) for _ in range(num_blocks)], class_id=0, cluster_id=3),
+        # Client 3: all 4 modes
+        ClientClassMoment(client_id=3, sample_count=50, mu=c0 - 0.05, block_covs=[torch.eye(d_b) for _ in range(num_blocks)], class_id=0, cluster_id=0),
+        ClientClassMoment(client_id=3, sample_count=50, mu=c1 + 0.05, block_covs=[torch.eye(d_b) for _ in range(num_blocks)], class_id=0, cluster_id=1),
+        ClientClassMoment(client_id=3, sample_count=50, mu=c2 - 0.05, block_covs=[torch.eye(d_b) for _ in range(num_blocks)], class_id=0, cluster_id=2),
+        ClientClassMoment(client_id=3, sample_count=50, mu=c3 + 0.05, block_covs=[torch.eye(d_b) for _ in range(num_blocks)], class_id=0, cluster_id=3),
+    ]
+
+    profiles = aggregate_total_variance_moments(
+        class_submissions={0: submissions},
+        num_blocks=num_blocks,
+        block_dim=d_b,
+        tikhonov_eps=1e-4,
     )
-    assert aligned_fallback.shape == (3, 2)
-    assert torch.allclose(aligned_fallback[0], fallback)
+
+    prof = profiles[0]
+    assert prof.prototypes is not None
+    assert prof.prototypes.shape == (4, d_z)
+    assert len(prof.block_covs) == 4
+    assert len(prof.inv_block_covs) == 4
+    assert prof.total_samples == 600
+
+    # Ensure inverted covariance blocks are positive-definite
+    for b in range(num_blocks):
+        eigs = torch.linalg.eigvalsh(prof.block_covs[b])
+        assert torch.all(eigs > 0.0)
 
 

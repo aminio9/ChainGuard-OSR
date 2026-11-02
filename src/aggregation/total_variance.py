@@ -22,6 +22,7 @@ class ClientClassMoment(NamedTuple):
     class_id: Optional[int] = None  # Known class index c in Y_K
     local_prototypes: Optional[torch.Tensor] = None  # Local multi-prototype centroids of shape (M_c, d_z)
     local_proto_counts: Optional[List[int]] = None  # Sample counts per local prototype cluster
+    cluster_id: int = 0  # Subcluster index m in {0, ..., M_c - 1} via Voronoi partitioning (Eq. 4.8)
 
 
 class GlobalClassProfile(NamedTuple):
@@ -116,6 +117,64 @@ def build_global_profile_from_moments(
     )
 
 
+def extract_one_shot_federated_reference_centers(
+    client_candidates: List[Tuple[torch.Tensor, List[int]]],
+    num_centers: int = 4,
+    random_state: int = 42,
+) -> torch.Tensor:
+    """Extract global reference centers {c_j}_{j=1}^{M_1} via One-Shot Federated K-Means (Wang et al. 2025).
+
+    Mathematical Formulation (LaTeX Algorithm 1, Phase 1):
+        1. Gathers representative candidate centers and sample counts from eligible nodes for multi-modal class.
+        2. Fits weighted K-Means on the coordinator to extract M_1 reference anchor centers.
+        3. Zero raw-data leakage: only candidate centroids and cluster scalar counts are transmitted.
+
+    Args:
+        client_candidates: List of (centers, counts) tuples from local nodes.
+        num_centers: Number of global reference modes M_1 (default: 4 for benign traffic).
+        random_state: RNG seed.
+
+    Returns:
+        Tensor of shape (num_centers, d_z) containing global reference centers {c_j}_{j=1}^{M_1}.
+    """
+    from sklearn.cluster import KMeans
+    import numpy as np
+
+    valid_subs = [
+        (c.cpu().to(torch.float32), (counts if counts is not None else [1] * c.size(0)))
+        for c, counts in client_candidates
+        if c is not None and c.ndim == 2 and c.size(0) > 0
+    ]
+
+    if not valid_subs:
+        return torch.zeros((num_centers, 64), dtype=torch.float32)
+
+    d_z = valid_subs[0][0].size(1)
+    all_centers = []
+    all_weights = []
+    for c_mat, counts in valid_subs:
+        for i in range(c_mat.size(0)):
+            all_centers.append(c_mat[i].numpy())
+            w = float(counts[i]) if i < len(counts) else 1.0
+            all_weights.append(w)
+
+    all_centers_np = np.asarray(all_centers, dtype=np.float32)
+    all_weights_np = np.asarray(all_weights, dtype=np.float32)
+
+    k_actual = min(num_centers, len(all_centers_np))
+    if k_actual > 1:
+        km = KMeans(n_clusters=k_actual, random_state=random_state, n_init=5)
+        km.fit(all_centers_np, sample_weight=all_weights_np)
+        centers = torch.from_numpy(km.cluster_centers_).to(torch.float32)
+    else:
+        centers = torch.from_numpy(all_centers_np[0:1]).to(torch.float32)
+
+    while centers.size(0) < num_centers:
+        centers = torch.cat([centers, centers[-1:]], dim=0)
+
+    return centers[:num_centers]
+
+
 def aggregate_total_variance_moments(
     class_submissions: Dict[int, List[ClientClassMoment]],
     num_blocks: int = 4,
@@ -126,25 +185,25 @@ def aggregate_total_variance_moments(
 ) -> Dict[int, GlobalClassProfile]:
     """Aggregate local moments into global class profiles via the Law of Total Variance (Section 4.3, Prop. 1).
 
-    Mathematical Formulation (LaTeX Section 4.3):
-        1. Global Centroid over eligible profiling nodes K_c^{prof} = {k in M : N_{k,c} >= N_min} (Eq. eq:global_mean):
-           mu_c = (1 / N_c^{prof}) * sum_{k in K_c^{prof}} N_{k,c} * mu_{k,c},   where N_c^{prof} = sum_{k in K_c^{prof}} N_{k,c}
+    Mathematical Formulation (LaTeX Section 4.3 & 4.5.1):
+        1. Single-Prototype Classes (Mc = 1, e.g. known attacks):
+           mu_c = sum_{k in K_c} w_k mu_{k,c}   (Eq. 4.1)
+           Sigma_{c,b} = sum_{k in K_c} w_k [S_{k,c,b} + (mu_{k,c,b} - mu_{c,b})(mu_{k,c,b} - mu_{c,b})^T]  (Eq. 4.2)
+           Regularized via OAS shrinkage: tilde{Sigma}_{c,b} = (1 - rho_{c,b}) Sigma_{c,b} + ... (Eq. 4.3 & 4.4)
 
-        2. Global Pooled Block-Covariance over the same eligible nodes K_c^{prof} = {k in M : N_{k,c} >= N_min}
-           (Eq. eq:global_block_cov):
-           Sigma_{c, G_b} = (1 / N_c^{prof}) * sum_{k in K_c^{prof}} N_{k,c} * [
-               Sigma_{k, c, G_b} + (mu_{k,c}[G_b] - mu_c[G_b])(mu_{k,c}[G_b] - mu_c[G_b])^T
-           ] + eps_v * I_{d_b}
-           The outer-product term captures between-node dispersion of local sample means mu_{k,c} around mu_c
-           (arising from finite local sample counts N_{k,c} under Dirichlet skew as well as any node-level
-           traffic variation), ensuring exact centralized pooled covariance recovery while keeping class-conditional
-           calibration samples exchangeable when pooled across K_{cal, c}.
+        2. Multi-Prototype Benign Traffic (M1 = 4, Voronoi Partitioning Eq. 4.8 / eq:ch4-voronoi-partition):
+           For each sub-cluster m in {1, ..., M_1}:
+               mu_{1,m} = sum_{k in K_1} w_k^{(1,m)} mu_{k,1,m}
+               Sigma_{1,m,b} = sum_{k in K_1} w_k^{(1,m)} [S_{k,1,m,b} + (mu_{k,1,m,b} - mu_{1,m,b})(mu_{k,1,m,b} - mu_{1,m,b})^T]
+           Common intra-cluster covariance across all 4 sub-clusters (Section 4.5.1):
+               Sigma_{1,b} = sum_{m=1}^{M_1} (N_{1,m} / N_1) Sigma_{1,m,b}
+           Regularized via OAS shrinkage: tilde{Sigma}_{1,b} from total normal sample count N_1.
 
     Args:
         class_submissions: Dict mapping class_id -> list of ClientClassMoment from eligible nodes K_c^{prof}.
         num_blocks: Number of diagonal sub-blocks B (default: 4).
         block_dim: Dimensionality of each sub-block d_b = d_z / B.
-        tikhonov_eps: Tikhonov regularization parameter eps_v > 0 (default: 1e-5).
+        tikhonov_eps: Tikhonov regularization parameter eps_v > 0 (default: 1e-4).
         apply_between_client_dispersion: If True (default), includes the Law of Total
             Variance outer-product dispersion term. If False, computes naive within-client
             average covariance (Ablation).
@@ -161,102 +220,193 @@ def aggregate_total_variance_moments(
         if not active_subs:
             continue
 
-        # Eligible profiling nodes K_c^{prof} = {k in M : N_{k,c} >= N_min}
-        prof_subs = [s for s in active_subs if s.sample_count >= min_cov_samples]
-        if not prof_subs:
-            prof_subs = active_subs
-
-        actual_latent = prof_subs[0].mu.size(0)
+        actual_latent = active_subs[0].mu.size(0)
         curr_b = num_blocks
         curr_db = block_dim
         if curr_b * curr_db != actual_latent:
             curr_b = min(curr_b, actual_latent)
             curr_db = actual_latent // curr_b
 
-        device = prof_subs[0].mu.device
+        device = active_subs[0].mu.device
         dtype = torch.float32
 
-        # Step 1: Pooled Sample Count N_c^{prof} and Centroid mu_c over K_c^{prof} (Eq. eq:global_mean)
-        total_samples = sum(s.sample_count for s in prof_subs)
-        n_c_prof = float(max(total_samples, 1))
+        # Check if class c has multiple Voronoi sub-clusters (e.g. normal traffic with M1 = 4)
+        cluster_ids = sorted(list(set(getattr(s, "cluster_id", 0) for s in active_subs)))
+        is_multi_cluster = len(cluster_ids) > 1 or (len(cluster_ids) == 1 and cluster_ids[0] > 0)
 
-        weighted_mu_sum = torch.zeros(actual_latent, dtype=dtype, device=device)
-        for s in prof_subs:
-            weighted_mu_sum += float(s.sample_count) * s.mu.to(dtype=dtype, device=device)
+        if is_multi_cluster:
+            # Multi-Prototype LOTV with Common Within-Cluster Covariance (LaTeX Section 4.5.1)
+            cluster_means: List[torch.Tensor] = []
+            cluster_covs_per_block: List[List[torch.Tensor]] = [[] for _ in range(curr_b)]  # block -> list of M_c covs
+            cluster_sample_counts: List[int] = []
 
-        global_mu = weighted_mu_sum / n_c_prof  # (d_z,)
+            for m in cluster_ids:
+                m_subs = [s for s in active_subs if getattr(s, "cluster_id", 0) == m and s.sample_count >= min_cov_samples]
+                if not m_subs:
+                    m_subs = [s for s in active_subs if getattr(s, "cluster_id", 0) == m]
+                if not m_subs:
+                    continue
 
-        # Step 2: Global Block-Covariance over the exact same set K_c^{prof} (Eq. eq:global_block_cov)
-        cov_subs = [
-            s for s in prof_subs
-            if s.block_covs is not None and len(s.block_covs) >= curr_b
-        ]
-        n_c_cov = float(max(sum(s.sample_count for s in cov_subs), 1))
+                n_c_m = sum(s.sample_count for s in m_subs)
+                cluster_sample_counts.append(n_c_m)
+                w_m_sum = torch.zeros(actual_latent, dtype=dtype, device=device)
+                for s in m_subs:
+                    w_m_sum += float(s.sample_count) * s.mu.to(dtype=dtype, device=device)
+                mu_c_m = w_m_sum / float(max(n_c_m, 1))
+                cluster_means.append(mu_c_m)
 
-        reg_eye = tikhonov_eps * torch.eye(curr_db, dtype=dtype).to(device)
-        global_block_covs: List[torch.Tensor] = []
-        inv_block_covs: List[torch.Tensor] = []
+                # Reconstruct Sigma_{c,m,b} via LOTV (Eq. 4.2)
+                for b in range(curr_b):
+                    start_idx = b * curr_db
+                    end_idx = start_idx + curr_db
+                    mu_c_m_b = mu_c_m[start_idx:end_idx]
 
-        for b in range(curr_b):
-            start_idx = b * curr_db
-            end_idx = start_idx + curr_db
-            mu_global_b = global_mu[start_idx:end_idx]
+                    pooled_m_b = torch.zeros((curr_db, curr_db), dtype=dtype, device=device)
+                    for s in m_subs:
+                        n_k = float(s.sample_count)
+                        local_cov_b = s.block_covs[b].to(dtype=dtype, device=device)
+                        local_mu_b = s.mu[start_idx:end_idx].to(dtype=dtype, device=device)
 
-            if cov_subs:
-                pooled_b = torch.zeros((curr_db, curr_db), dtype=dtype, device=device)
-                for s in cov_subs:
-                    n_k = float(s.sample_count)
-                    local_block_cov = s.block_covs[b].to(dtype=dtype, device=device)
-                    local_mu_b = s.mu[start_idx:end_idx].to(dtype=dtype, device=device)
+                        if apply_between_client_dispersion:
+                            mean_diff = (local_mu_b - mu_c_m_b).unsqueeze(1)
+                            dispersion_b = torch.matmul(mean_diff, mean_diff.t())
+                            pooled_m_b += n_k * (local_cov_b + dispersion_b)
+                        else:
+                            pooled_m_b += n_k * local_cov_b
 
-                    if apply_between_client_dispersion:
-                        # Between-client dispersion term: (mu_{k,c}[G_b] - mu_c[G_b])(mu_{k,c}[G_b] - mu_c[G_b])^T
-                        mean_diff = (local_mu_b - mu_global_b).unsqueeze(1)  # (d_b, 1)
-                        dispersion_b = torch.matmul(mean_diff, mean_diff.t())  # (d_b, d_b)
-                        pooled_b += n_k * (local_block_cov + dispersion_b)
-                    else:
-                        # Naive within-client mean covariance (omits between-client dispersion)
-                        pooled_b += n_k * local_block_cov
+                    sigma_c_m_b = pooled_m_b / float(max(n_c_m, 1))
+                    cluster_covs_per_block[b].append(sigma_c_m_b)
 
-                # Normalize by N_c^{cov} and apply Server-Side OAS Shrinkage (if regularized)
-                raw_cov = pooled_b / n_c_cov
+            total_samples = sum(cluster_sample_counts)
+            n_c_total = float(max(total_samples, 1))
+
+            # Stack prototype matrix M_c x d_z
+            prototypes_tensor = torch.stack(cluster_means, dim=0) if cluster_means else torch.zeros((1, actual_latent), device=device)
+            # Weighted overall mean
+            overall_mu = torch.sum(
+                torch.stack([float(n) * m_vec for n, m_vec in zip(cluster_sample_counts, cluster_means)], dim=0),
+                dim=0,
+            ) / n_c_total
+
+            # Weighted average across sub-clusters for common within-cluster covariance (LaTeX Section 4.5.1)
+            global_block_covs: List[torch.Tensor] = []
+            inv_block_covs: List[torch.Tensor] = []
+
+            for b in range(curr_b):
+                weighted_cov_b = torch.zeros((curr_db, curr_db), dtype=dtype, device=device)
+                for n_m, cov_m_b in zip(cluster_sample_counts, cluster_covs_per_block[b]):
+                    weighted_cov_b += float(n_m) * cov_m_b
+                raw_cov = weighted_cov_b / n_c_total
                 raw_cov = 0.5 * (raw_cov + raw_cov.t())
+
                 if tikhonov_eps > 0.0:
-                    sigma_c_b, _ = compute_server_side_oas_shrinkage(raw_cov, int(n_c_cov), tikhonov_eps=tikhonov_eps)
+                    sigma_c_b, _ = compute_server_side_oas_shrinkage(raw_cov, int(n_c_total), tikhonov_eps=tikhonov_eps)
                 else:
                     sigma_c_b = raw_cov
-            else:
-                sigma_c_b = torch.eye(curr_db, dtype=dtype).to(device) + reg_eye
 
-            # Invert for wire-speed Mahalanobis inference
-            try:
-                inv_sigma_c_b = torch.linalg.inv(sigma_c_b)
-            except RuntimeError:
-                inv_sigma_c_b = torch.linalg.pinv(sigma_c_b)
+                try:
+                    inv_sigma_c_b = torch.linalg.inv(sigma_c_b)
+                except RuntimeError:
+                    inv_sigma_c_b = torch.linalg.pinv(sigma_c_b)
 
-            global_block_covs.append(sigma_c_b)
-            inv_block_covs.append(inv_sigma_c_b)
+                global_block_covs.append(sigma_c_b)
+                inv_block_covs.append(inv_sigma_c_b)
 
-        # Step 3: Legacy Quantile Fallback (overridden by Stage 3 Pooled Empirical CDF Calibration)
-        weighted_q_sum = 0.0
-        cal_sample_total = 0
-        for s in active_subs:
-            if s.cal_quantile is not None and math.isfinite(float(s.cal_quantile)):
-                weighted_q_sum += float(s.sample_count) * float(s.cal_quantile)
-                cal_sample_total += s.sample_count
+            proto_inv_block_covs = [inv_block_covs for _ in range(prototypes_tensor.size(0))]
 
-        conformal_tau = (
-            weighted_q_sum / max(cal_sample_total, 1) if cal_sample_total > 0 else 0.0
-        )
+            profiles[c] = GlobalClassProfile(
+                class_id=c,
+                total_samples=total_samples,
+                mu=overall_mu,
+                block_covs=global_block_covs,
+                inv_block_covs=inv_block_covs,
+                conformal_threshold=0.0,
+                prototypes=prototypes_tensor,
+                proto_inv_block_covs=proto_inv_block_covs,
+            )
+        else:
+            # Single-Prototype LOTV Aggregation (LaTeX Section 4.3, Mc = 1)
+            prof_subs = [s for s in active_subs if s.sample_count >= min_cov_samples]
+            if not prof_subs:
+                prof_subs = active_subs
 
-        profiles[c] = GlobalClassProfile(
-            class_id=c,
-            total_samples=total_samples,
-            mu=global_mu,
-            block_covs=global_block_covs,
-            inv_block_covs=inv_block_covs,
-            conformal_threshold=conformal_tau,
-        )
+            total_samples = sum(s.sample_count for s in prof_subs)
+            n_c_prof = float(max(total_samples, 1))
+
+            weighted_mu_sum = torch.zeros(actual_latent, dtype=dtype, device=device)
+            for s in prof_subs:
+                weighted_mu_sum += float(s.sample_count) * s.mu.to(dtype=dtype, device=device)
+            global_mu = weighted_mu_sum / n_c_prof
+
+            cov_subs = [
+                s for s in prof_subs
+                if s.block_covs is not None and len(s.block_covs) >= curr_b
+            ]
+            n_c_cov = float(max(sum(s.sample_count for s in cov_subs), 1))
+
+            reg_eye = tikhonov_eps * torch.eye(curr_db, dtype=dtype).to(device)
+            global_block_covs = []
+            inv_block_covs = []
+
+            for b in range(curr_b):
+                start_idx = b * curr_db
+                end_idx = start_idx + curr_db
+                mu_global_b = global_mu[start_idx:end_idx]
+
+                if cov_subs:
+                    pooled_b = torch.zeros((curr_db, curr_db), dtype=dtype, device=device)
+                    for s in cov_subs:
+                        n_k = float(s.sample_count)
+                        local_block_cov = s.block_covs[b].to(dtype=dtype, device=device)
+                        local_mu_b = s.mu[start_idx:end_idx].to(dtype=dtype, device=device)
+
+                        if apply_between_client_dispersion:
+                            mean_diff = (local_mu_b - mu_global_b).unsqueeze(1)
+                            dispersion_b = torch.matmul(mean_diff, mean_diff.t())
+                            pooled_b += n_k * (local_block_cov + dispersion_b)
+                        else:
+                            pooled_b += n_k * local_block_cov
+
+                    raw_cov = pooled_b / n_c_cov
+                    raw_cov = 0.5 * (raw_cov + raw_cov.t())
+                    if tikhonov_eps > 0.0:
+                        sigma_c_b, _ = compute_server_side_oas_shrinkage(raw_cov, int(n_c_cov), tikhonov_eps=tikhonov_eps)
+                    else:
+                        sigma_c_b = raw_cov
+                else:
+                    sigma_c_b = torch.eye(curr_db, dtype=dtype).to(device) + reg_eye
+
+                try:
+                    inv_sigma_c_b = torch.linalg.inv(sigma_c_b)
+                except RuntimeError:
+                    inv_sigma_c_b = torch.linalg.pinv(sigma_c_b)
+
+                global_block_covs.append(sigma_c_b)
+                inv_block_covs.append(inv_sigma_c_b)
+
+            weighted_q_sum = 0.0
+            cal_sample_total = 0
+            for s in active_subs:
+                if s.cal_quantile is not None and math.isfinite(float(s.cal_quantile)):
+                    weighted_q_sum += float(s.sample_count) * float(s.cal_quantile)
+                    cal_sample_total += s.sample_count
+
+            conformal_tau = (
+                weighted_q_sum / max(cal_sample_total, 1) if cal_sample_total > 0 else 0.0
+            )
+
+            profiles[c] = GlobalClassProfile(
+                class_id=c,
+                total_samples=total_samples,
+                mu=global_mu,
+                block_covs=global_block_covs,
+                inv_block_covs=inv_block_covs,
+                conformal_threshold=conformal_tau,
+                prototypes=None,
+                proto_inv_block_covs=None,
+            )
+
+    return profiles
 
     return profiles
 

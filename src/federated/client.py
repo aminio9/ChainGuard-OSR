@@ -236,6 +236,60 @@ class FederatedClient:
         return self.get_parameters(), {}, avg_metrics
 
     @torch.no_grad()
+    def extract_representative_centers(
+        self,
+        frozen_encoder: nn.Module,
+        class_id: int = 0,
+        num_centers: int = 4,
+    ) -> Tuple[Optional[torch.Tensor], Optional[List[int]]]:
+        """Extract local candidate representative centers for One-Shot Federated K-Means (Wang et al. 2025).
+
+        Mathematical Formulation (LaTeX Algorithm 1, Phase 1):
+            1. Extracts local latent embeddings z_{k,1} for benign multi-modal traffic.
+            2. Computes initial local candidate centers and sample cluster weights via K-Means.
+            3. Uploads only candidate center vectors and scalar weights (Zero Raw Data Leakage).
+
+        Args:
+            frozen_encoder: Frozen representation extractor.
+            class_id: Class index (0 for normal traffic).
+            num_centers: Maximum candidate centers M_1 (default: 4).
+
+        Returns:
+            Tuple of (candidate_centers, sample_counts_per_center).
+        """
+        frozen_encoder.eval()
+        idx = (self.labels_dev == class_id)
+        count = int(idx.sum().item())
+        if count == 0:
+            return None, None
+
+        all_z = []
+        chunk_size = 4096
+        for i in range(0, self.num_samples, chunk_size):
+            x_chunk = self.features_dev[i : i + chunk_size]
+            mu_z = extract_latent_mu(frozen_encoder, x_chunk)
+            all_z.append(mu_z)
+        z_all = torch.cat(all_z, dim=0) if all_z else torch.empty((0, self.config.model.latent_dim), device=self.device)
+        if getattr(self.config.osr, "normalize_features", False):
+            norm_z = torch.norm(z_all, p=2, dim=-1, keepdim=True).clamp(min=1e-8)
+            z_all = z_all / norm_z
+
+        z_c = z_all[idx]
+        k_actual = min(num_centers, count)
+        if k_actual <= 1:
+            mean_v = torch.mean(z_c, dim=0, keepdim=True).cpu()
+            return mean_v, [count]
+
+        from sklearn.cluster import KMeans
+        import numpy as np
+        feat_np = z_c.cpu().numpy()
+        km = KMeans(n_clusters=k_actual, random_state=42, n_init=3)
+        km.fit(feat_np)
+        centers = torch.from_numpy(km.cluster_centers_).to(dtype=z_c.dtype).cpu()
+        counts_arr = np.bincount(km.labels_, minlength=k_actual)
+        return centers, [int(x) for x in counts_arr]
+
+    @torch.no_grad()
     def extract_phase_two_moments(
         self,
         frozen_encoder: nn.Module,
@@ -243,8 +297,19 @@ class FederatedClient:
         block_dim: int = 16,
         alpha: float = 0.05,
         min_cov_samples: Optional[int] = None,
+        reference_centers: Optional[Dict[int, torch.Tensor]] = None,
     ) -> List[ClientClassMoment]:
-        """Extract local class means over K_c and sub-block covariances over K_c^{cov} (Section 4.3, Eqs. eq:local_mean & eq:local_block_cov).
+        """Extract local moments via Voronoi partitioning against global reference centers (Section 4.3, Eq. 4.8).
+
+        Mathematical Formulation:
+            1. Benign Traffic (Mc = 4, Voronoi Partitioning Eq. 4.8 / eq:ch4-voronoi-partition):
+               D_{k,1,m} = { z_i in D_{k,1} | m = argmin_{j in {1, ..., M_1}} ||z_i - c_j||_2^2 }
+               For each active cluster m with N_{k,1,m} >= N_min:
+                   Uploads (mu_{k,1,m}, S_{k,1,m}) with cluster_id = m.
+               If a node did not experience mode m, cluster m is naturally omitted (no artificial fragmentation).
+
+            2. Known Attack Classes (Mc = 1):
+               Directly estimates (mu_{k,c}, S_{k,c}) on whole class samples with cluster_id = 0.
 
         Args:
             frozen_encoder: Permanently frozen global encoder f_{theta^*}.
@@ -252,9 +317,10 @@ class FederatedClient:
             block_dim: Dimensionality of each sub-block d_b = d_z / B (default: 16).
             alpha: Mondrian conformal significance level.
             min_cov_samples: Minimum sample count N_min >= 3 required to upload local block covariances.
+            reference_centers: Dict mapping class_id -> global reference centers tensor (M_c, d_z).
 
         Returns:
-            List of ClientClassMoment submissions for all present local classes c in Y_k (N_{k,c} > 0).
+            List of ClientClassMoment submissions for all present local classes and active clusters.
         """
         frozen_encoder.eval()
         n_min = min_cov_samples if min_cov_samples is not None else getattr(self.config.federated, "min_cov_samples", 3)
@@ -277,10 +343,6 @@ class FederatedClient:
             num_blocks = min(num_blocks, actual_latent)
             block_dim = actual_latent // num_blocks
 
-        use_mp = getattr(self.config.osr, "use_multi_prototype", True)
-        m0 = getattr(self.config.osr, "num_prototypes_normal", 4)
-        mc_atk = getattr(self.config.osr, "num_prototypes_attack", 1)
-
         moments_list: List[ClientClassMoment] = []
 
         for c in self.local_classes:
@@ -292,57 +354,68 @@ class FederatedClient:
 
             z_c = z_all[idx]  # Shape: (count, d_z)
 
-            # Section 4.3, Eq. eq:local_mean: Local mean mu_{k,c} uploaded by k in K_c^{prof} (N_{k,c} >= N_min)
-            mu_k_c = torch.mean(z_c, dim=0)  # Shape: (d_z,)
+            # Check if multi-modal reference centers exist for class c (LaTeX Eq. 4.8 / eq:ch4-voronoi-partition)
+            if reference_centers is not None and c in reference_centers and reference_centers[c] is not None:
+                ref_c = reference_centers[c].to(device=self.device)  # Shape: (M_c, d_z)
+                M_c = ref_c.size(0)
 
-            # Privacy-Preserving Local k-means for Multi-Prototype Classes (e.g., M_1 = 4 for normal class)
-            target_m = m0 if c == 0 else mc_atk
-            local_protos = None
-            local_proto_counts = None
-            assigned_centers = mu_k_c.unsqueeze(0).expand(count, -1)  # Default: around local class mean
+                # Euclidean Voronoi Partitioning: m = argmin_{j} ||z_i - c_j||_2^2
+                dists_to_ref = torch.cdist(z_c, ref_c)  # Shape: (count, M_c)
+                assignments = torch.argmin(dists_to_ref, dim=-1)  # Shape: (count,)
 
-            if use_mp and target_m > 1:
-                k_actual = min(target_m, count)
-                if k_actual > 1:
-                    from sklearn.cluster import KMeans
-                    import numpy as np
-                    feat_np = z_c.cpu().numpy()
-                    km = KMeans(n_clusters=k_actual, random_state=42, n_init=3)
-                    km.fit(feat_np)
-                    local_protos = torch.from_numpy(km.cluster_centers_).to(dtype=z_c.dtype).cpu()
-                    counts_arr = np.bincount(km.labels_, minlength=k_actual)
-                    local_proto_counts = [int(x) for x in counts_arr]
-                    # Compute intra-cluster deviations from assigned local prototype center (FedProto / One-Shot Clustering)
-                    assigned_centers = local_protos[km.labels_].to(device=self.device)
-                else:
-                    local_protos = mu_k_c.unsqueeze(0).cpu()
-                    local_proto_counts = [count]
+                for m in range(M_c):
+                    m_mask = (assignments == m)
+                    n_m = int(m_mask.sum().item())
+                    if n_m < n_min:
+                        # Cluster omitted if samples are below support threshold N_min
+                        continue
 
-            # Section 4.3, Eq. eq:local_block_cov: Sub-block covariances Sigma_{k, c, G_b}
-            # Intra-cluster local covariance: deviations around assigned prototype centers
-            block_covs: List[torch.Tensor] = []
-            for b in range(num_blocks):
-                start = b * block_dim
-                end = start + block_dim
-                z_c_b = z_c[:, start:end]  # (count, d_b)
-                centers_b = assigned_centers[:, start:end]  # (count, d_b)
+                    z_m = z_c[m_mask]
+                    mu_m = torch.mean(z_m, dim=0)
 
-                diff_b = z_c_b - centers_b  # (count, d_b)
-                cov_b = torch.matmul(diff_b.t(), diff_b) / float(count)
-                block_covs.append(cov_b.cpu())
+                    block_covs_m: List[torch.Tensor] = []
+                    for b in range(num_blocks):
+                        start = b * block_dim
+                        end = start + block_dim
+                        z_m_b = z_m[:, start:end]
+                        diff_m_b = z_m_b - mu_m[start:end].unsqueeze(0)
+                        cov_m_b = torch.matmul(diff_m_b.t(), diff_m_b) / float(n_m)
+                        block_covs_m.append(cov_m_b.cpu())
 
-            moments_list.append(
-                ClientClassMoment(
-                    client_id=self.client_id,
-                    sample_count=count,
-                    mu=mu_k_c.cpu(),
-                    block_covs=block_covs,
-                    cal_quantile=None,
-                    class_id=c,
-                    local_prototypes=local_protos,
-                    local_proto_counts=local_proto_counts,
+                    moments_list.append(
+                        ClientClassMoment(
+                            client_id=self.client_id,
+                            sample_count=n_m,
+                            mu=mu_m.cpu(),
+                            block_covs=block_covs_m,
+                            cal_quantile=None,
+                            class_id=c,
+                            cluster_id=m,
+                        )
+                    )
+            else:
+                # Single-Prototype Class (Mc = 1): direct moment estimation on whole class
+                mu_k_c = torch.mean(z_c, dim=0)
+                block_covs: List[torch.Tensor] = []
+                for b in range(num_blocks):
+                    start = b * block_dim
+                    end = start + block_dim
+                    z_c_b = z_c[:, start:end]
+                    diff_b = z_c_b - mu_k_c[start:end].unsqueeze(0)
+                    cov_b = torch.matmul(diff_b.t(), diff_b) / float(count)
+                    block_covs.append(cov_b.cpu())
+
+                moments_list.append(
+                    ClientClassMoment(
+                        client_id=self.client_id,
+                        sample_count=count,
+                        mu=mu_k_c.cpu(),
+                        block_covs=block_covs,
+                        cal_quantile=None,
+                        class_id=c,
+                        cluster_id=0,
+                    )
                 )
-            )
 
         return moments_list
 
@@ -420,7 +493,7 @@ class FederatedClient:
         )
         histograms: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
         for c, scores_t in scores_by_class.items():
-            counts, edges = compute_right_closed_histogram(scores_t, bin_edges=bin_edges)
+            counts, edges = compute_right_closed_histogram(scores_t, bin_edges=bin_edges, include_overflow=True)
             histograms[int(c)] = (counts, edges)
         return histograms
 

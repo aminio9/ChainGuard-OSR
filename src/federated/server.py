@@ -189,7 +189,38 @@ class FederatedServer:
             num_blocks = min(num_blocks, latent_dim)
             block_dim = latent_dim // num_blocks
 
-        # Stage 2 (Section 4.3): Parallel extraction of moments from eligible nodes K_c^{prof} = {k in M : N_{k,c} >= N_min}
+        # Stage 2 (LaTeX Algorithm 1, Phase 1): One-Shot Federated K-Means & Reference Center Broadcast (Wang et al. 2025)
+        use_mp = getattr(self.config.osr, "use_multi_prototype", True)
+        m0 = getattr(self.config.osr, "num_prototypes_normal", 4)
+        mc_atk = getattr(self.config.osr, "num_prototypes_attack", 1)
+        reference_centers_map: Dict[int, torch.Tensor] = {}
+
+        if use_mp:
+            from src.aggregation.total_variance import extract_one_shot_federated_reference_centers
+            for c in range(len(self.config.data.known_classes)):
+                target_m = m0 if c == 0 else mc_atk
+                if target_m <= 1:
+                    continue
+
+                candidate_list = []
+                for client in self.clients:
+                    if c in client.local_classes:
+                        centers, counts = client.extract_representative_centers(
+                            frozen_encoder=self.global_model.encoder,
+                            class_id=c,
+                            num_centers=target_m,
+                        )
+                        if centers is not None and len(centers) > 0:
+                            candidate_list.append((centers, counts))
+
+                if candidate_list:
+                    global_ref_centers = extract_one_shot_federated_reference_centers(
+                        client_candidates=candidate_list,
+                        num_centers=target_m,
+                    ).to(device=self.device)
+                    reference_centers_map[c] = global_ref_centers
+
+        # Stage 2 (LaTeX Algorithm 1, Phase 1 & 2): Voronoi Partitioning & LOTV Moment Aggregation
         class_moments_map: Dict[int, List[ClientClassMoment]] = {
             c: [] for c in range(len(self.config.data.known_classes))
         }
@@ -203,9 +234,10 @@ class FederatedServer:
                 block_dim=block_dim,
                 alpha=alpha,
                 min_cov_samples=min_cov_samples,
+                reference_centers=reference_centers_map,
             )
-            for idx, m_item in enumerate(m_list):
-                c = int(m_item.class_id) if m_item.class_id is not None else int(client.local_classes[idx])
+            for m_item in m_list:
+                c = int(m_item.class_id) if m_item.class_id is not None else int(client.local_classes[0])
                 if c in class_moments_map:
                     class_moments_map[c].append(m_item)
 
@@ -220,12 +252,13 @@ class FederatedServer:
                             block_dim=block_dim,
                             alpha=alpha,
                             min_cov_samples=1,
+                            reference_centers=reference_centers_map,
                         )
                         for m_item in fallback_list:
                             if m_item.class_id == c:
                                 class_moments_map[c].append(m_item)
 
-        # Law of Total Variance aggregation over K_c^{prof}
+        # Law of Total Variance aggregation with Common Intra-Cluster Covariance (LaTeX Section 4.5.1 / Prop. 1)
         self.global_profiles = aggregate_total_variance_moments(
             class_submissions=class_moments_map,
             num_blocks=num_blocks,
@@ -233,51 +266,6 @@ class FederatedServer:
             tikhonov_eps=tikhonov_eps,
             min_cov_samples=min_cov_samples,
         )
-
-        # Multi-Prototype Hyperspherical Profiling (AMP-OAS, AEGIS-Net 2026 / MPHIL 2026)
-        # Prototypes are extracted from the TRAINING partition only (client.dataset).
-        # cal_dataset is reserved exclusively for Stage 3 conformal calibration — mixing them
-        # would inflate empirical calibration coverage (prototypes fit to cal → small cal scores
-        # → tight τ → over-rejection) and violate conformal validity.
-        # Multi-Prototype Hyperspherical Profiling (One-Shot Federated Clustering with Bipartite Matching)
-        # 100% Privacy Preserving: Nodes run local k-means and upload ONLY local prototype centroids and sample counts.
-        # No raw embeddings z leave any client. All M_c prototypes share the common aggregated total-variance block precision matrix.
-        use_mp = getattr(self.config.osr, "use_multi_prototype", True)
-        if use_mp:
-            from src.aggregation.total_variance import federated_align_and_average_prototypes
-
-            m0 = getattr(self.config.osr, "num_prototypes_normal", 4)
-            mc_atk = getattr(self.config.osr, "num_prototypes_attack", 1)
-            norm_feat = getattr(self.config.osr, "normalize_features", False)
-
-            for c in self.global_profiles.keys():
-                target_m = m0 if c == 0 else mc_atk
-                if target_m <= 1:
-                    continue
-
-                local_subs = []
-                for m_item in class_moments_map.get(c, []):
-                    if m_item.local_prototypes is not None:
-                        local_subs.append((m_item.local_prototypes, m_item.local_proto_counts or [m_item.sample_count]))
-
-                if local_subs:
-                    protos_c = federated_align_and_average_prototypes(
-                        local_prototypes_list=local_subs,
-                        target_num_prototypes=target_m,
-                        normalize_features=norm_feat,
-                        fallback_mean=self.global_profiles[c].mu,
-                    ).to(device=self.device)
-
-                    # All M_c prototypes share the common aggregated total-variance block precision matrix
-                    shared_inv_blocks = [
-                        b_mat.to(device=self.device) for b_mat in self.global_profiles[c].inv_block_covs
-                    ]
-                    proto_inv_covs_c = [shared_inv_blocks for _ in range(protos_c.size(0))]
-
-                    self.global_profiles[c] = self.global_profiles[c]._replace(
-                        prototypes=protos_c,
-                        proto_inv_block_covs=proto_inv_covs_c,
-                    )
 
 
 
@@ -387,19 +375,25 @@ class FederatedServer:
                             c_node.cal_dataset = orig_cal
 
                 import scipy.stats as stats
-                fallback_chi2_tau = float(stats.chi2.ppf(1.0 - alpha, df=num_blocks * block_dim))
+                total_dim = num_blocks * block_dim
+                fallback_chi2_tau = float(stats.chi2.ppf(1.0 - alpha, df=total_dim))
+                chi2_b_c = float(stats.chi2.ppf(0.999, df=total_dim))
                 num_bins = 2048
                 for c in class_keys:
                     c_arrays = client_scores_per_class[c]
                     n_cal_c = int(sum(len(arr) for arr in c_arrays))
                     if n_cal_c > 0:
-                        s_max_c = max(max(float(np.max(arr)) for arr in c_arrays), 1e-6)
-                        shared_bin_edges = np.linspace(0.0, s_max_c, num_bins + 1)
+                        # Establish finite upper bound B_c independent of calibration outliers (LaTeX Section 4.6.1)
+                        s_max_local = max(float(np.max(arr)) for arr in c_arrays)
+                        b_c = max(chi2_b_c, s_max_local)
+                        shared_bin_edges = np.linspace(0.0, b_c, num_bins + 1)
                         client_hists = [
-                            compute_right_closed_histogram(arr, bin_edges=shared_bin_edges)
+                            compute_right_closed_histogram(arr, bin_edges=shared_bin_edges, include_overflow=True)
                             for arr in c_arrays
                         ]
                         new_tau = float(aggregate_distributed_cdfs(client_hists, alpha=alpha))
+                        if not math.isfinite(new_tau):
+                            new_tau = fallback_chi2_tau
                     else:
                         new_tau = fallback_chi2_tau
 
