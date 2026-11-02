@@ -10,16 +10,17 @@ import torch
 def compute_right_closed_histogram(
     scores: np.ndarray | torch.Tensor,
     bin_edges: np.ndarray,
+    include_overflow: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute right-closed histogram counts over shared bin grid [0, S_{max,c}] (Section 4.4).
+    """Compute right-closed histogram counts over uniform grid [0, B_c] with overflow bin (B_c, +inf) (Section 4.4, Eqs. 4.7-4.8).
 
-    Bin partition:
+    Bin partition (LaTeX Eqs. eq:ch4-bin-intervals & eq:ch4-local-hist):
         I_{c, 1} = [xi_{c, 0}, xi_{c, 1}]
         I_{c, m} = (xi_{c, m-1}, xi_{c, m}]  for m = 2, ..., M_bin
-    with xi_{c, 0} = 0 and xi_{c, M_bin} = S_{max, c}.
-    Guarantees sum_{m=1}^{M_bin} h_{k, c, m} = n_{cal, k, c} and
-    hat{F}_{k, c}(xi_{c, m}) = (1 / n_{cal, k, c}) * |{j : s_{k, j}^{(c)} <= xi_{c, m}}|,
-    so hat{F}_c(xi_{c, M_bin}) = 1 holds identically.
+        I_{c, M_bin+1} = (B_c, +inf)  (overflow bin, with xi_{c, M_bin+1} = +inf)
+    with xi_{c, 0} = 0 and xi_{c, M_bin} = B_c.
+
+    Guarantees sum_{m=1}^{M_bin+1} h_{k, c, m} = N_{k, c}^{cal} identically without dropping tail scores.
     """
     if isinstance(scores, torch.Tensor):
         scores_np = scores.detach().cpu().numpy().flatten()
@@ -29,14 +30,31 @@ def compute_right_closed_histogram(
     edges = np.asarray(bin_edges, dtype=np.float64)
     num_bins = len(edges) - 1
     if len(scores_np) == 0 or num_bins <= 0:
-        return np.zeros(max(num_bins, 0), dtype=np.int64), edges
+        total_bins = num_bins + (1 if include_overflow else 0)
+        extended_edges = np.append(edges, np.inf) if include_overflow else edges
+        return np.zeros(max(total_bins, 0), dtype=np.int64), extended_edges
 
-    # searchsorted(..., side='left') on edges[1:] maps s <= xi_{c,1} to bin 0 ([xi_0, xi_1])
-    # and xi_{c,m-1} < s <= xi_{c,m} to bin m-1 ((xi_{m-1}, xi_m])
-    bin_indices = np.searchsorted(edges[1:], scores_np, side="left")
-    bin_indices = np.clip(bin_indices, 0, num_bins - 1)
-    counts = np.bincount(bin_indices, minlength=num_bins).astype(np.int64)
-    return counts, edges
+    if include_overflow:
+        b_c = float(edges[-1])
+        is_overflow = scores_np > b_c
+        regular_scores = scores_np[~is_overflow]
+        n_overflow = int(is_overflow.sum())
+
+        if len(regular_scores) > 0:
+            bin_indices = np.searchsorted(edges[1:], regular_scores, side="left")
+            bin_indices = np.clip(bin_indices, 0, num_bins - 1)
+            reg_counts = np.bincount(bin_indices, minlength=num_bins).astype(np.int64)
+        else:
+            reg_counts = np.zeros(num_bins, dtype=np.int64)
+
+        counts = np.append(reg_counts, n_overflow)
+        extended_edges = np.append(edges, np.inf)
+        return counts, extended_edges
+    else:
+        bin_indices = np.searchsorted(edges[1:], scores_np, side="left")
+        bin_indices = np.clip(bin_indices, 0, num_bins - 1)
+        counts = np.bincount(bin_indices, minlength=num_bins).astype(np.int64)
+        return counts, edges
 
 
 def compute_finite_sample_quantile(
@@ -90,24 +108,21 @@ def aggregate_distributed_cdfs(
     client_histograms: List[Tuple[np.ndarray, np.ndarray]],
     alpha: float = 0.05,
 ) -> float:
-    """Compute pooled finite-sample quantile by aggregating local empirical CDF histograms (Section 4.4).
+    """Compute pooled finite-sample quantile by aggregating local empirical CDF histograms (Section 4.4, Eqs. 4.7-4.8).
 
-    Unlike weighted averaging of local quantiles (which fails to recover the pooled quantile
-    under Non-IID partitions; Lu et al., ICML 2023; Plassier et al., ICML 2023), empirical CDF
-    and right-closed histogram counts on [0, S_{max, c}] are linear and additive across clients k in K_{cal, c}:
-        hat{F}_c(xi_{c, m}) = (1 / N_{cal, c}) * sum_{k in K_{cal, c}} sum_{r=1}^m h_{k, c, r}
-                            = (1 / N_{cal, c}) * sum_{k in K_{cal, c}} n_{cal, k, c} * hat{F}_{k, c}(xi_{c, m})
-    with hat{F}_c(xi_{c, M_bin}) = 1 identically.
-    Inverting hat{F}_c at level r_{alpha, c} / N_{cal, c} (or returning S_{max, c} = xi_{c, M_bin}
-    when 1 <= N_{cal, c} < ceil(1/alpha) - 1) preserves finite-sample Mondrian coverage and keeps
-    0 < tau_{alpha, c} <= S_{max, c} < inf.
+    Mathematical Formulation:
+        H_{c,m} = sum_{k in K_c} h_{k,c,m}   (Eq. eq:ch4-global-hist)
+        N_c^{cal} = sum_{m=1}^{M_bin+1} H_{c,m}  (Eq. eq:ch4-total-cal-samples)
+        r_c = ceil((N_c^{cal} + 1)(1 - alpha))   (Eq. eq:ch4-conformal-rank)
+        q_hat = min { xi_{c,m} | sum_{j=1}^m H_{c,j} >= r_c }  (Eq. eq:ch4-conformal-threshold)
+        If r_c > N_c^{cal} or rank falls in overflow bin (m = M_bin+1): q_hat = +inf.
 
     Args:
-        client_histograms: List of tuples (bin_counts, bin_edges) sharing a common grid [0, S_{max, c}].
+        client_histograms: List of tuples (bin_counts, bin_edges) sharing a common grid.
         alpha: Significance level in (0, 1).
 
     Returns:
-        Finite-sample corrected quantile from the pooled empirical CDF (or S_{max, c} if 1 <= N_{cal, c} < ceil(1/alpha) - 1).
+        Finite-sample corrected quantile from pooled empirical CDF (or +inf if insufficient samples).
     """
     if not client_histograms:
         return float("inf")
@@ -120,13 +135,14 @@ def aggregate_distributed_cdfs(
 
     target_rank = np.ceil((n_total + 1.0) * (1.0 - alpha))
     if target_rank > n_total:
-        return float(max(float(bin_edges[-1]), 1e-12))
+        return float("inf")
 
     cum_counts = np.cumsum(total_counts)
     idx = int(np.searchsorted(cum_counts, target_rank, side="left"))
-    # Return upper bin edge xi_{c, m} of the first bin where hat{F}_c(xi_{c, m}) >= r_{alpha, c} / N_{cal, c}
+    # In right-closed partitioning, bin index idx corresponds to upper boundary bin_edges[idx + 1]
     edge_idx = min(idx + 1, len(bin_edges) - 1)
-    return float(max(float(bin_edges[edge_idx]), 1e-12))
+    val = float(bin_edges[edge_idx])
+    return val
 
 
 def aggregate_distributed_quantiles(

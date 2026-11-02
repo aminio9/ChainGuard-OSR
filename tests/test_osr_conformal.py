@@ -1,5 +1,6 @@
 """Tests for Open-Set Recognition and Mondrian Conformal Prediction (LaTeX Section 4.4 & Algorithm 2)."""
 
+import math
 import numpy as np
 import torch
 from src.osr.weibull_evt import WeibullEVTFitter, compute_evt_probabilities
@@ -78,3 +79,37 @@ def test_wire_speed_edge_detector_zero_day(decoupled_model):
     preds, is_unk, cands, scores = detector.predict_batch(x_batch)
     assert len(preds) == 5
     assert len(is_unk) == 5
+
+
+def test_distributed_conformal_overflow_bin_and_conservative_quantile():
+    """Verify LaTeX Eqs. 4.7-4.8:
+    Histogram binning with overflow bin (B_c, +inf) and finite-sample quantile aggregation.
+    """
+    from src.osr.conformal import compute_right_closed_histogram, aggregate_distributed_cdfs
+    import numpy as np
+
+    b_c = 50.0
+    num_bins = 50
+    bin_edges = np.linspace(0.0, b_c, num_bins + 1)
+
+    # Client 1: 95 normal scores in [0, 40] and 5 extreme outliers > 50 (in overflow bin)
+    scores_k1 = np.concatenate([np.linspace(1.0, 40.0, 95), np.array([55.0, 60.0, 75.0, 80.0, 100.0])])
+    counts_k1, edges_k1 = compute_right_closed_histogram(scores_k1, bin_edges=bin_edges, include_overflow=True)
+    assert len(counts_k1) == num_bins + 1
+    assert counts_k1[-1] == 5
+    assert np.isinf(edges_k1[-1])
+
+    # Client 2: 100 normal scores in [5, 45] and 0 outliers
+    scores_k2 = np.linspace(5.0, 45.0, 100)
+    counts_k2, edges_k2 = compute_right_closed_histogram(scores_k2, bin_edges=bin_edges, include_overflow=True)
+    assert counts_k2[-1] == 0
+
+    # Aggregate histograms across clients
+    alpha = 0.05
+    tau_agg = aggregate_distributed_cdfs([(counts_k1, edges_k1), (counts_k2, edges_k2)], alpha=alpha)
+    assert math.isfinite(tau_agg)
+    assert 40.0 <= tau_agg <= 50.0
+
+    # Test edge case: insufficient samples where r_c > N_c returns +inf
+    tau_inf = aggregate_distributed_cdfs([(np.array([1, 0]), np.array([0.0, 10.0, np.inf]))], alpha=0.01)
+    assert np.isinf(tau_inf)
