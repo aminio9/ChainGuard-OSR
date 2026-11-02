@@ -223,15 +223,28 @@ class WireSpeedEdgeDetector:
 
         dist_dict: Dict[int, float] = {c: float(v.item()) for c, v in dists.items()}
 
-        # Candidate selection based on minimum raw Mahalanobis distance
-        best_class = min(dist_dict.keys(), key=lambda c: dist_dict[c])
+        # Normalized scores: D_c(z) / tau_{alpha, c} (LaTeX Eq. 4.10)
+        scores_dict: Dict[int, float] = {}
+        for c, d in dist_dict.items():
+            tau_c = self.profiles[c].conformal_threshold
+            tau_safe = tau_c if (tau_c > 0.0 and math.isfinite(tau_c)) else 1.0
+            scores_dict[c] = d / tau_safe
+
+        # Conformal acceptance set: C(z) = {c | D_c(z) <= tau_c} (LaTeX Eq. 4.9)
+        accepted_classes = [c for c, d in dist_dict.items() if d <= self.profiles[c].conformal_threshold]
+
+        # Decision Rule (LaTeX Eq. 4.10): Reject iff C(z) is empty; else argmin_{c in C(z)} D_c(z) / tau_c
+        if not accepted_classes:
+            is_unknown = True
+            pred_label = self.unknown_label
+            best_class = min(scores_dict.keys(), key=lambda c: scores_dict[c])
+        else:
+            is_unknown = False
+            best_class = min(accepted_classes, key=lambda c: scores_dict[c])
+            pred_label = best_class
+
         s_score = dist_dict[best_class]
-
         threshold = self.profiles[best_class].conformal_threshold
-
-        # Decision Rule: Reject iff D(z, c_hat) > tau_{alpha, c_hat}
-        is_unknown = s_score > threshold
-        pred_label = self.unknown_label if is_unknown else best_class
 
         return MahalanobisInferenceResult(
             predicted_label=pred_label,
@@ -291,14 +304,27 @@ class WireSpeedEdgeDetector:
             device=device,
         )
 
-        # Candidate selection based on minimum raw Mahalanobis distance
-        best_indices = torch.argmin(dist_matrix, dim=1)  # (N,)
-        cand_distances = torch.gather(dist_matrix, 1, best_indices.unsqueeze(1)).squeeze(1)
-        cand_thresholds = thresholds[best_indices]
+        # Conformal acceptance mask: C(z) = {c | D_c(z) <= tau_c} (LaTeX Eq. 4.9)
+        accepted_mask = dist_matrix <= thresholds.unsqueeze(0)  # (N, C)
+        has_accepted = torch.any(accepted_mask, dim=1)  # (N,)
+        is_unknown_tensor = ~has_accepted  # (N,)
 
-        # Decision rule: reject iff candidate distance exceeds candidate calibrated threshold
-        is_unknown_tensor = cand_distances > cand_thresholds
+        # Normalized distances: D_c(z) / tau_{alpha, c} (LaTeX Eq. 4.10)
+        valid_tau = (thresholds > 0.0) & torch.isfinite(thresholds)
+        safe_thresholds = torch.where(valid_tau, thresholds, torch.ones_like(thresholds))
+        norm_dist_matrix = dist_matrix / safe_thresholds.unsqueeze(0)  # (N, C)
+
+        # Decision rule (LaTeX Eq. 4.10): argmin_{c in C(z)} D_c(z) / tau_c if C(z) != empty, else argmin over all classes
+        norm_for_accepted = torch.where(accepted_mask, norm_dist_matrix, torch.tensor(float("inf"), device=device))
+        best_indices = torch.where(
+            has_accepted,
+            torch.argmin(norm_for_accepted, dim=1),
+            torch.argmin(norm_dist_matrix, dim=1),
+        )
+
         cand_tensor = class_keys_tensor[best_indices]
+        cand_distances = torch.gather(dist_matrix, 1, best_indices.unsqueeze(1)).squeeze(1)
+
         preds_tensor = torch.where(
             is_unknown_tensor,
             torch.tensor(self.unknown_label, dtype=torch.int64, device=device),
@@ -347,20 +373,28 @@ class WireSpeedEdgeDetector:
         valid_tau = (thresholds > 0.0) & torch.isfinite(thresholds)
         safe_thresholds = torch.where(valid_tau, thresholds, torch.ones_like(thresholds))
         norm_dist_matrix = dist_matrix / safe_thresholds.unsqueeze(0)
-        best_raw_indices = torch.argmin(dist_matrix, dim=1)
-        best_norm_indices = torch.argmin(norm_dist_matrix, dim=1)
         accepted_mask = dist_matrix <= thresholds.unsqueeze(0)
+        has_accepted = torch.any(accepted_mask, dim=1)
+        is_unk_tensor = ~has_accepted
 
-        cand_distances = torch.gather(dist_matrix, 1, best_raw_indices.unsqueeze(1)).squeeze(1)
-        cand_thresholds = thresholds[best_raw_indices]
-        is_unk_tensor = cand_distances > cand_thresholds
-        cand_tensor = class_keys_tensor[best_raw_indices]
+        # Decision rule (LaTeX Eq. 4.10)
+        norm_for_accepted = torch.where(accepted_mask, norm_dist_matrix, torch.tensor(float("inf"), device=device))
+        best_indices = torch.where(
+            has_accepted,
+            torch.argmin(norm_for_accepted, dim=1),
+            torch.argmin(norm_dist_matrix, dim=1),
+        )
+
+        cand_tensor = class_keys_tensor[best_indices]
+        cand_distances = torch.gather(dist_matrix, 1, best_indices.unsqueeze(1)).squeeze(1)
+        cand_thresholds = thresholds[best_indices]
+
         preds_tensor = torch.where(
             is_unk_tensor,
             torch.tensor(self.unknown_label, dtype=torch.int64, device=device),
             cand_tensor,
         )
-        norm_scores_tensor = torch.gather(norm_dist_matrix, 1, best_norm_indices.unsqueeze(1)).squeeze(1)
+        norm_scores_tensor = torch.gather(norm_dist_matrix, 1, best_indices.unsqueeze(1)).squeeze(1)
         raw_scores_tensor = cand_distances
         tau_used_tensor = cand_thresholds
 
