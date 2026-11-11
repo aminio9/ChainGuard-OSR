@@ -1,14 +1,12 @@
-"""Composite Phase I Local Loss Calculator (LaTeX Section 4.2, Eq. eq:total_client_loss).
+"""Local Composite Training Loss.
 
+Combines:
+    1. Balanced Logit Adjustment Loss: Handles extreme class imbalance across clients
+       by shifting margins and restricting the denominator strictly to present classes.
+    2. Variational Information Bottleneck KL Regularization: Constrains latent mutual
+       information to produce smooth, clustered feature representations.
 Formulation:
-    L_local(theta_k, psi_k) = L_BLA(theta_k, psi_k) + lambda_vib * L_VIB(theta_k)
-
-Features:
-    1. Logit-Adjusted Balanced Risk Minimization (L_BLA): Enlarges rare-class margins among
-       present classes (c in Y_k) and suppresses absent-class gradients (c in Y_K \\ Y_k)
-       on the shared encoder f_{theta_k}.
-    2. Variational Information Bottleneck (L_VIB): Pulls posterior means mu(x; theta_k) toward
-       the origin and injects Gaussian noise during training to reduce packet-noise sensitivity.
+    L_total = L_BLA + lambda_vib * L_VIB
 """
 
 from __future__ import annotations
@@ -21,13 +19,14 @@ import torch.nn as nn
 from src.losses.logit_adjusted import (
     LogitAdjustedBalancedLoss,
     compute_laplace_class_priors,
+    compute_local_class_frequencies,
 )
 from src.losses.vib_loss import vib_kl_divergence_loss
 from src.config import LossConfig
 
 
 class CompositeLossCalculator:
-    """Computes total composite training loss across Phase I objectives: L_local = L_BLA + lambda_vib * L_VIB."""
+    """Computes total local composite training loss: L_total = L_BLA + lambda_vib * L_VIB."""
 
     def __init__(self, config: LossConfig):
         self.config = config
@@ -48,18 +47,18 @@ class CompositeLossCalculator:
         class_priors: Optional[torch.Tensor] = None,
         samples_per_class: Optional[Union[List[int], np.ndarray, torch.Tensor]] = None,
         return_tensors: bool = False,
-        **kwargs: Any,  # Gracefully accept legacy unused arguments (teacher_logits, t_ratio, etc.)
+        **kwargs: Any,  # Gracefully accept legacy unused arguments
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
-        """Compute Phase I loss components.
+        """Compute composite loss components for local training.
 
         Args:
-            logits: Output classification logits ell_k(x) in R^{|C_K|}.
-            targets: Ground-truth class labels y in C_K.
-            mu: Latent representation mean from VIB mu(x; theta).
-            logvar: Latent representation log-variance from VIB log sigma^2(x; theta).
-            class_priors: Precomputed Laplace class priors pi^{(k)}.
-            samples_per_class: Class-frequency distribution if priors are not precomputed.
-            return_tensors: If True, returns detached tensors in breakdown to avoid GPU-CPU sync stalls.
+            logits: Output classification logits of shape (batch_size, num_classes).
+            targets: Ground-truth class labels.
+            mu: Latent representation mean from VIB encoder.
+            logvar: Latent representation log-variance from VIB encoder.
+            class_priors: Precomputed local class frequencies.
+            samples_per_class: Local class counts if class_priors are not precomputed.
+            return_tensors: If True, returns detached tensors in breakdown to prevent GPU stalls.
 
         Returns:
             (total_loss, breakdown_metrics)
@@ -67,12 +66,19 @@ class CompositeLossCalculator:
         # 1. Obtain or compute class priors
         if class_priors is None:
             if samples_per_class is not None:
-                class_priors = compute_laplace_class_priors(
-                    samples_per_class,
-                    num_classes=logits.size(1),
-                    epsilon=self.laplace_eps,
-                    device=logits.device,
-                )
+                if getattr(self.config, "use_laplace_priors", False) and self.laplace_eps > 0.0:
+                    class_priors = compute_laplace_class_priors(
+                        samples_per_class,
+                        num_classes=logits.size(1),
+                        epsilon=self.laplace_eps,
+                        device=logits.device,
+                    )
+                else:
+                    class_priors = compute_local_class_frequencies(
+                        samples_per_class,
+                        num_classes=logits.size(1),
+                        device=logits.device,
+                    )
             else:
                 # Uniform fallback
                 class_priors = torch.ones(logits.size(1), device=logits.device) / float(logits.size(1))

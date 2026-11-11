@@ -1,4 +1,4 @@
-"""Known-Class Classification Head C_phi (LaTeX Section 4.1.1, Eq. 32)."""
+"""Classification Head for Known Classes."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from src.models.base import BaseNetwork
 
 
 class ClassificationHead(BaseNetwork):
-    """Linear classification head mapping latent space to known class logits: C_phi(z) -> R^{|C_K|} (Eq. 32)."""
+    """Linear classification head mapping latent space vectors to class logits."""
 
     def __init__(self, latent_dim: int = 64, num_classes: int = 4, bias: bool = True):
         super().__init__()

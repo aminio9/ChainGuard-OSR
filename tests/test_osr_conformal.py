@@ -1,4 +1,4 @@
-"""Tests for Open-Set Recognition and Mondrian Conformal Prediction (LaTeX Section 4.4 & Algorithm 2)."""
+"""Tests for Open-Set Recognition and Mondrian Conformal Prediction."""
 
 import math
 import numpy as np
@@ -82,9 +82,7 @@ def test_wire_speed_edge_detector_zero_day(decoupled_model):
 
 
 def test_distributed_conformal_overflow_bin_and_conservative_quantile():
-    """Verify LaTeX Eqs. 4.7-4.8:
-    Histogram binning with overflow bin (B_c, +inf) and finite-sample quantile aggregation.
-    """
+    """Verify histogram binning with overflow bin and finite-sample quantile aggregation."""
     from src.osr.conformal import compute_right_closed_histogram, aggregate_distributed_cdfs
     import numpy as np
 

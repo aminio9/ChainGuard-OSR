@@ -1,4 +1,13 @@
-"""Class-Conditional Mondrian Conformal Prediction with Finite-Sample Guarantees (Equations 22-25 & Theorem 2)."""
+"""Distributed Mondrian Conformal Calibration.
+
+Calibrates per-class decision thresholds independently to guarantee marginal coverage
+and control false alarm rates without pooling raw calibration scores at the server:
+    1. Local Nonconformity Scores: Mahalanobis distance to nearest class prototype.
+    2. Local Histogram Bins: Nodes bin scores into discrete intervals with an overflow bin.
+    3. Global Histogram Aggregation: Server sums bin counts across nodes.
+    4. Conformal Quantile Computation: Server determines the (1 - alpha) quantile threshold
+       from cumulative histogram frequencies.
+"""
 
 from __future__ import annotations
 
@@ -12,15 +21,14 @@ def compute_right_closed_histogram(
     bin_edges: np.ndarray,
     include_overflow: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute right-closed histogram counts over uniform grid [0, B_c] with overflow bin (B_c, +inf) (Section 4.4, Eqs. 4.7-4.8).
+    """Compute right-closed histogram counts over a uniform grid with an overflow bin.
 
-    Bin partition (LaTeX Eqs. eq:ch4-bin-intervals & eq:ch4-local-hist):
-        I_{c, 1} = [xi_{c, 0}, xi_{c, 1}]
-        I_{c, m} = (xi_{c, m-1}, xi_{c, m}]  for m = 2, ..., M_bin
-        I_{c, M_bin+1} = (B_c, +inf)  (overflow bin, with xi_{c, M_bin+1} = +inf)
-    with xi_{c, 0} = 0 and xi_{c, M_bin} = B_c.
+    Bin partition:
+        First bin: [edges[0], edges[1]]
+        Intermediate bins: (edges[m-1], edges[m]]
+        Overflow bin: (edges[-1], +inf)
 
-    Guarantees sum_{m=1}^{M_bin+1} h_{k, c, m} = N_{k, c}^{cal} identically without dropping tail scores.
+    Guarantees the sum of bin counts equals the total sample count without losing tail scores.
     """
     if isinstance(scores, torch.Tensor):
         scores_np = scores.detach().cpu().numpy().flatten()
@@ -61,27 +69,20 @@ def compute_finite_sample_quantile(
     scores: np.ndarray | torch.Tensor,
     alpha: float = 0.05,
 ) -> float:
-    """Compute finite-sample corrected quantile (Section 4.4, Eq. eq:conformal_quantile).
+    """Compute finite-sample corrected conformal quantile for a given significance level alpha.
 
-    Mathematical Formulation (Eq. eq:conformal_quantile):
-        r_{alpha, c} = ceil((N_{cal, c} + 1)(1 - alpha))
-        tau_{alpha, c} = min { xi_{c, m} : hat{F}_c(xi_{c, m}) >= r_{alpha, c} / N_{cal, c} }
-                       = S_{(r_{alpha, c})}  when r_{alpha, c} <= N_{cal, c}.
-        If 1 <= N_{cal, c} < ceil(1/alpha) - 1 (so r_{alpha, c} > N_{cal, c}), setting
-        tau_{alpha, c} = +inf would collapse the normalized ratio D_block(z, c) / tau_{alpha, c} = 0
-        in open-set point prediction; therefore tau_{alpha, c} = S_{max, c} < inf, guaranteeing
-        finite-sample coverage at level N_{cal, c} / (N_{cal, c} + 1) while keeping tau_{alpha, c} in (0, inf).
-
-    Proposition 2 Guarantee (when N_{cal, c} >= ceil(1/alpha) - 1):
-        P( D_block(f_{theta^*}(X_test), c) > tau_{alpha, c} | Y_test = c ) <= alpha
-        P( hat{y}_OSR(X_test) = Unknown | Y_test = c ) <= alpha
+    Formulation:
+        Target rank: r = ceil((N + 1) * (1 - alpha))
+        Threshold: Order statistic S_{(r)} when r <= N.
+        If samples are scarce (r > N), falls back to the maximum observed score S_max
+        to prevent threshold explosion while maintaining valid finite coverage.
 
     Args:
-        scores: Array or tensor of nonconformity scores for class c.
+        scores: Array or tensor of nonconformity scores.
         alpha: Significance level in (0, 1) (default: 0.05 for 95% coverage).
 
     Returns:
-        Empirical finite-sample corrected quantile in (0, inf) (or +inf only if N_{cal, c} == 0).
+        Empirical finite-sample corrected quantile threshold.
     """
     if isinstance(scores, torch.Tensor):
         scores_np = scores.detach().cpu().numpy().flatten()
@@ -108,21 +109,20 @@ def aggregate_distributed_cdfs(
     client_histograms: List[Tuple[np.ndarray, np.ndarray]],
     alpha: float = 0.05,
 ) -> float:
-    """Compute pooled finite-sample quantile by aggregating local empirical CDF histograms (Section 4.4, Eqs. 4.7-4.8).
+    """Compute pooled finite-sample quantile by aggregating local empirical CDF histograms.
 
-    Mathematical Formulation:
-        H_{c,m} = sum_{k in K_c} h_{k,c,m}   (Eq. eq:ch4-global-hist)
-        N_c^{cal} = sum_{m=1}^{M_bin+1} H_{c,m}  (Eq. eq:ch4-total-cal-samples)
-        r_c = ceil((N_c^{cal} + 1)(1 - alpha))   (Eq. eq:ch4-conformal-rank)
-        q_hat = min { xi_{c,m} | sum_{j=1}^m H_{c,j} >= r_c }  (Eq. eq:ch4-conformal-threshold)
-        If r_c > N_c^{cal} or rank falls in overflow bin (m = M_bin+1): q_hat = +inf.
+    Formulation:
+        1. Global histogram: H = sum_k h_k across participating nodes.
+        2. Total calibration samples: N_cal = sum(H).
+        3. Target rank: r = ceil((N_cal + 1) * (1 - alpha)).
+        4. Quantile threshold: upper boundary of the bin where cumulative counts reach r.
 
     Args:
         client_histograms: List of tuples (bin_counts, bin_edges) sharing a common grid.
         alpha: Significance level in (0, 1).
 
     Returns:
-        Finite-sample corrected quantile from pooled empirical CDF (or +inf if insufficient samples).
+        Finite-sample corrected quantile from pooled empirical CDF.
     """
     if not client_histograms:
         return float("inf")
@@ -279,14 +279,7 @@ def evaluate_conformal_sensitivity_sweep(
     num_known_classes: int,
     alphas: Optional[List[float]] = None,
 ) -> List[Dict[str, Any]]:
-    """Evaluate empirical coverage, KFR, and zero-day recall across multiple conformal significance levels alpha.
-
-    Mathematical Formulation (LaTeX Section 4.4 & Section 5.4 Sensitivity Sweep):
-        r_{alpha, c} = ceil((N_{cal, c} + 1)(1 - alpha))
-        tau_{alpha, c} = S_{(r_{alpha, c})}
-        C_{1-alpha}(x) = { c in Y_K : D(z, c) <= tau_{alpha, c} }
-        hat{y}(x) = Unknown  iff  C_{1-alpha}(x) == empty
-    """
+    """Evaluate empirical coverage, known false rejection rate, and zero-day recall across significance levels."""
     if alphas is None:
         alphas = [0.03, 0.05, 0.08, 0.10, 0.12, 0.15, 0.20]
 
@@ -340,110 +333,4 @@ def evaluate_conformal_sensitivity_sweep(
         })
 
     return results
-
-
-class ThreeWayConformalDecisionResult(NamedTuple):
-    """Structured output for Conformal Three-Way Decision with Abstention (Bao & Gao 2025; Yao 2010)."""
-
-    actions: np.ndarray  # 'accept', 'abstain', or 'reject'
-    predictions: np.ndarray  # candidate class if accepted, unknown_label (-1 or C) if rejected or abstained
-    is_accepted: np.ndarray  # True for Positive region (POS): D <= tau_accept
-    is_abstained: np.ndarray  # True for Boundary region (BND): tau_accept < D <= tau_reject
-    is_rejected: np.ndarray  # True for Negative region (NEG): D > tau_reject
-    is_unknown: np.ndarray  # Total flagged non-accepted (is_rejected | is_abstained)
-    candidate_classes: np.ndarray  # argmin_c D(z, c)
-    scores: np.ndarray  # Nonconformity distance to candidate class
-    tau_accept: np.ndarray  # Acceptance threshold used per sample
-    tau_reject: np.ndarray  # Rejection threshold used per sample
-
-    # Backward-compatible aliases
-    @property
-    def is_fast_pass(self) -> np.ndarray:
-        return self.is_accepted
-
-    @property
-    def is_inspected(self) -> np.ndarray:
-        return self.is_abstained
-
-    @property
-    def is_instant_drop(self) -> np.ndarray:
-        return self.is_rejected
-
-    @property
-    def tau_defer(self) -> np.ndarray:
-        return self.tau_accept
-
-    @property
-    def tau_drop(self) -> np.ndarray:
-        return self.tau_reject
-
-
-def compute_three_way_conformal_decision(
-    dist_matrix: np.ndarray | torch.Tensor,
-    tau_reject_map: Optional[Dict[int, float]] = None,
-    tau_accept_map: Optional[Dict[int, float]] = None,
-    unknown_label: int = -1,
-    **kwargs: Any,
-) -> ThreeWayConformalDecisionResult:
-    """Compute Conformal Three-Way Decision with Abstention (POS / BND / NEG).
-
-    Grounded in Decision-Theoretic Rough Sets (Yao 2010; Bao & Gao, Scientific Reports 2025)
-    and calibrated via federated empirical score distributions:
-        - Positive Region (POS / Accept): D(z, c*) <= tau_accept,c*   --> Action a_accept
-        - Boundary Region (BND / Abstain): tau_accept,c* < D(z, c*) <= tau_reject,c* --> Action a_abstain
-        - Negative Region (NEG / Reject): D(z, c*) > tau_reject,c*   --> Action a_reject
-
-    Args:
-        dist_matrix: Distance matrix of shape (N, C) across known classes.
-        tau_reject_map: Dict mapping class_id -> tau_reject (e.g., at nominal alpha_reject = 0.05).
-        tau_accept_map: Dict mapping class_id -> tau_accept (e.g., at nominal alpha_accept = 0.10).
-        unknown_label: Label assigned to rejected/abstained samples.
-
-    Returns:
-        ThreeWayConformalDecisionResult namedtuple with diagnostic decision masks.
-    """
-    # Support backward-compatible kwargs
-    if "tau_drop_map" in kwargs:
-        tau_reject_map = kwargs["tau_drop_map"]
-    if "tau_defer_map" in kwargs:
-        tau_accept_map = kwargs["tau_defer_map"]
-    tau_reject_map = tau_reject_map or {}
-    tau_accept_map = tau_accept_map or {}
-
-    if isinstance(dist_matrix, torch.Tensor):
-        dist_mat = dist_matrix.detach().cpu().numpy()
-    else:
-        dist_mat = np.asarray(dist_matrix)
-
-    n_samples, num_known = dist_mat.shape
-    best_cand = np.argmin(dist_mat, axis=1)
-    scores = dist_mat[np.arange(n_samples), best_cand]
-
-    tau_reject_arr = np.array([tau_reject_map.get(c, float("inf")) for c in best_cand], dtype=np.float64)
-    tau_accept_arr = np.array([tau_accept_map.get(c, float("inf")) for c in best_cand], dtype=np.float64)
-
-    is_accepted = (scores <= tau_accept_arr)
-    is_abstained = (scores > tau_accept_arr) & (scores <= tau_reject_arr)
-    is_rejected = (scores > tau_reject_arr)
-    is_unknown = is_rejected | is_abstained
-
-    actions = np.empty(n_samples, dtype=object)
-    actions[is_accepted] = "accept"
-    actions[is_abstained] = "abstain"
-    actions[is_rejected] = "reject"
-
-    preds = np.where(is_accepted, best_cand, unknown_label)
-
-    return ThreeWayConformalDecisionResult(
-        actions=actions,
-        predictions=preds,
-        is_accepted=is_accepted,
-        is_abstained=is_abstained,
-        is_rejected=is_rejected,
-        is_unknown=is_unknown,
-        candidate_classes=best_cand,
-        scores=scores,
-        tau_accept=tau_accept_arr,
-        tau_reject=tau_reject_arr,
-    )
 

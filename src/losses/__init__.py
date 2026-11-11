@@ -1,25 +1,31 @@
-"""Canonical Loss Functions for FedTROS-MC (LaTeX Section 4.1, Equations 23-87).
+"""Loss Functions for Federated Representation Learning.
 
-1. Class-Balanced Loss (L_CB, Eq. 23-30)
-2. Variational Information Bottleneck KL Regularization (L_VIB, Eq. 46)
-3. Dynamic Global Anchor Knowledge Distillation (L_anchor, Eq. 59-69)
-4. Composite Objective Calculator (L_local, Eq. 87)
+Includes:
+    - Balanced Logit Adjustment Loss (LogitAdjustedBalancedLoss, BLALoss)
+    - Variational Information Bottleneck KL Regularizer (vib_kl_divergence_loss)
+    - Local Composite Training Loss Calculator (CompositeLossCalculator)
 """
 
-from src.losses.class_balanced import class_balanced_focal_loss
-from src.losses.vib_loss import vib_kl_divergence_loss
-from src.losses.anchor_loss import (
-    DynamicGlobalAnchorLoss,
-    compute_shannon_certainty,
-    compute_anchor_weight,
+from src.losses.logit_adjusted import (
+    LogitAdjustedBalancedLoss,
+    logit_adjusted_balanced_loss,
+    compute_local_class_frequencies,
+    compute_laplace_class_priors,
 )
+from src.losses.bla_loss import (
+    LogitAdjustedBalancedLoss as BLALoss,
+    logit_adjusted_balanced_loss as bla_loss,
+)
+from src.losses.vib_loss import vib_kl_divergence_loss
 from src.losses.composite_loss import CompositeLossCalculator
 
 __all__ = [
-    "class_balanced_focal_loss",
+    "LogitAdjustedBalancedLoss",
+    "logit_adjusted_balanced_loss",
+    "BLALoss",
+    "bla_loss",
+    "compute_local_class_frequencies",
+    "compute_laplace_class_priors",
     "vib_kl_divergence_loss",
-    "DynamicGlobalAnchorLoss",
-    "compute_shannon_certainty",
-    "compute_anchor_weight",
     "CompositeLossCalculator",
 ]

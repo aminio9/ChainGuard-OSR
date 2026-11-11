@@ -1,4 +1,4 @@
-"""Integration tests verifying complete federated training and 3-Phase protocol execution (LaTeX Algorithms 1 & 2)."""
+"""Integration tests verifying complete federated training and 3-Phase protocol execution."""
 
 import numpy as np
 import torch
@@ -10,7 +10,7 @@ from src.federated.server import FederatedServer
 
 
 def test_three_phase_protocol_end_to_end(sample_config):
-    """Verify complete 3-Phase protocol from LaTeX Algorithms 1 & 2."""
+    """Verify complete 3-Phase protocol: representation learning, moment profiling, conformal calibration."""
     device = torch.device("cpu")
     num_classes = len(sample_config.data.known_classes)
 
@@ -88,7 +88,7 @@ def test_three_phase_protocol_end_to_end(sample_config):
     assert len(cands) == 10
     assert len(scores) == 10
 
-    # Verify profiles were broadcast back to each client ("دوباره محلی") (LaTeX Algorithm 2)
+    # Verify profiles were broadcast back to each client for wire-speed edge detection
     for client in clients:
         assert client.global_profiles is not None
         assert client.edge_detector is not None

@@ -36,7 +36,7 @@ from src.data.base import FlowDataset
 from src.federated.client import FederatedClient
 from src.federated.server import FederatedServer
 from src.metrics.osr_metrics import compute_osr_metrics
-from src.visualization.latex_tables import generate_latex_loao_table
+from src.utils.latex_tables import generate_latex_loao_table
 
 
 LOAO_ATTACKS = {

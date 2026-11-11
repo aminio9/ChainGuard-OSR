@@ -1,70 +1,73 @@
+# ==============================================================================
+# Federated Open-Set Intrusion Detection (Proposed Framework) Configuration
+# ==============================================================================
+
 experiment:
   name: "federated_osr_canonical"
   seed: 42
-  device: "auto" # "cuda", "cpu", or "auto"
+  device: "auto"                       # "cuda", "cpu", or "auto"
   output_dir: "results/runs"
   checkpoint_dir: "checkpoints"
   save_checkpoints: true
   save_frequency: 10
 
 data:
-  dataset_name: "b_nat"
+  dataset_name: "b_nat"                # Benchmark blockchain network traffic dataset
   data_dir: "data/raw"
-  in_features: 31
-  num_classes_total: 5
-  known_classes: [0, 1, 2, 3]          # Normal, BP, DoS, MitM
-  unknown_classes: [4]                 # FoT (Zero-day unknown attack)
+  in_features: 31                      # Dimensionality of preprocessed flow features
+  num_classes_total: 5                 # Total classes across training and open-set evaluation
+  known_classes: [0, 1, 2, 3]          # In-distribution classes observed during training (0: normal traffic)
+  unknown_classes: [4]                 # Zero-day exploit reserved exclusively for open-set test evaluation
   test_split_ratio: 0.2
-  cal_split_ratio: 0.1                 # Calibration set for Conformal Prediction
+  cal_split_ratio: 0.1                 # Calibration split reserved for conformal threshold estimation
 
 federated:
-  num_clients: 10
-  client_fraction: 1.0                 # Full or partial client participation
-  num_rounds: 30                       # Communication rounds
-  local_epochs: 2                      # E = 2 local epochs per round (Section 5.3)
-  batch_size: 64                       # B_s = 64 mini-batch size (Section 5.3)
-  num_blocks: 1                        # B = 1 full covariance (or B = 2 for lightweight edge mode)
-  block_dim: 64                        # d_b = 64 (or 32 for Block-2)
-  tikhonov_eps: 0.0001                 # Tikhonov stabilizer epsilon_v = 1e-4
-  shrinkage_method: "oas"              # Server-Side OAS Shrinkage (Chen et al. 2010)
+  num_clients: 10                      # Number of participating edge nodes
+  client_fraction: 1.0                 # Client sampling ratio per round
+  num_rounds: 30                       # Federated communication rounds
+  local_epochs: 2                      # Local training epochs per client per round
+  batch_size: 64                       # Client mini-batch size
+  num_blocks: 1                        # Number of diagonal sub-blocks (1: full covariance matrix)
+  block_dim: 64                        # Latent representation dimension
+  min_cov_samples: 3                   # Minimum local sample threshold required for covariance estimation
+  tikhonov_eps: 0.0001                 # Diagonal stabilizer ensuring strict positive definiteness
+  shrinkage_method: "oas"              # Oracle Approximating Shrinkage for optimal sample-efficiency
+  aggregation_strategy: "fedavg"       # Sample-weighted parameter aggregation
   partition:
-    strategy: "iid"                    # "iid" or "dirichlet"
-    beta_dirichlet: 0.5                # Non-IID Dirichlet parameter
+    strategy: "dirichlet"              # Non-IID partitioning strategy
+    beta_dirichlet: 0.5                # Dirichlet concentration parameter controlling label skew
 
 model:
-  architecture: "vib_network"
-  in_features: 31
-  latent_dim: 64                       # d_z = 64 bottleneck dimension
-  hidden_dim: [256, 128]               # High-capacity MLP backbone: 256 -> 128
+  architecture: "vib_network"          # Variational Information Bottleneck encoder architecture
+  in_features: 31                      # Input flow feature dimension
+  latent_dim: 64                       # Compact bottleneck embedding dimension
+  hidden_dim: [256, 128]               # Hidden layer dimensions for feature extraction
   dropout: 0.1
   use_batchnorm: true
   use_layernorm: false
   activation: "relu"
-  stochastic_encoder: true
+  stochastic_encoder: true             # Enable Gaussian reparameterization during training
 
 optimization:
-  optimizer: "adam"                    # Adam with Cosine Annealing (Section 5.3)
-  learning_rate: 0.001                 # eta_0 = 10^-3 (Section 5.3)
-  eta_min: 0.000001                    # eta_min = 10^-6 (Section 5.3)
+  optimizer: "adam"                    # Gradient optimizer
+  learning_rate: 0.001                 # Initial learning rate
+  eta_min: 0.000001                    # Minimum learning rate for cosine scheduler
   weight_decay: 0.0001
-  clip_grad_norm: 1.0                  # Gradient clipping at 1.0 (Section 5.3)
+  clip_grad_norm: 1.0                  # Maximum gradient norm for numerical stability
 
 loss:
-  tau_bla: 1.0                         # Balanced logit-adjusted margin (Section 4.2.1, L_BLA)
-  laplace_eps: 0.1                     # Laplace smoothing for local priors (Section 4.2.1)
-  lambda_vib: 0.01                     # VIB KL penalty weight (Section 4.2.2)
-  beta_cb: 0.999                       # Deprecated fallback
-  focal_gamma: 2.0                     # Deprecated fallback
-  lambda_anchor: 0.0                   # Anchor loss removed in favor of L_BLA
+  tau_bla: 1.0                         # Class-frequency margin tuning parameter
+  lambda_vib: 0.01                     # Information bottleneck compression weight
+  laplace_eps: 0.0                     # Strict masking of absent classes without smoothing distortion
 
 osr:
   method: "block_mahalanobis_conformal"
-  metric_type: "mahalanobis"            # OAS Mahalanobis (Theorem 1: Law of Total Variance)
-  conformal_alpha: 0.05                # 95% guaranteed coverage bound (alpha = 0.05)
-  num_blocks: 1                        # Primary: Full Covariance (B=1, d_b=64)
+  metric_type: "mahalanobis"            # Nonconformity metric based on statistical covariance
+  conformal_alpha: 0.05                # Target miscoverage rate (bounds known false alarm rate)
+  num_blocks: 1                        # Full covariance evaluation
   block_dim: 64
-  normalize_features: false            # Preserve full 64-D anisotropic covariance structure
-  shrinkage_method: "oas"
-  use_multi_prototype: true            # Macro-Prototype Profiling (AEGIS-Net / MPHIL)
-  num_prototypes_normal: 4             # M_0 = 4 macro-prototypes for multi-modal normal traffic
-  num_prototypes_attack: 1             # M_c = 1 prototype for known attack categories
+  normalize_features: false            # Preserve native anisotropic Euclidean geometry in latent space
+  shrinkage_method: "oas"              # Regularized matrix inversion
+  use_multi_prototype: true            # Multi-modal modeling of normal network traffic
+  num_prototypes_normal: 4             # Number of behavioral reference modes for normal traffic
+  num_prototypes_attack: 1             # Unimodal modeling for localized attack categories

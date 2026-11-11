@@ -232,7 +232,7 @@ class BaseBaseline(ABC):
         use_mondrian: bool = False,
         temperature: float = 1.0,
     ) -> float:
-        """Unified scoring & Mondrian conformal calibration for fair baseline comparison (Section 2)."""
+        """Unified scoring & Mondrian conformal calibration for fair baseline comparison."""
         y_cal = cal_dataset.labels.cpu().numpy()
         for c in range(self.num_classes):
             self.cal_class_counts[c] = int(np.sum(y_cal == c))

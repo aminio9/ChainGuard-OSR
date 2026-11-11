@@ -145,7 +145,7 @@ def compute_osr_metrics(
     unknown_label: int = -1,
     closed_preds: np.ndarray | None = None,
 ) -> Dict[str, Any]:
-    """Compute comprehensive Open-Set Recognition evaluation metrics per Section 5.5 of paper."""
+    """Compute comprehensive Open-Set Recognition evaluation metrics."""
     y_true = np.asarray(y_true, dtype=np.int64)
     y_pred = np.asarray(y_pred, dtype=np.int64)
 

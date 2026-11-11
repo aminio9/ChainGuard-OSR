@@ -37,11 +37,6 @@ from src.metrics.statistical_tests import (
     summarize_multi_seed_comparison,
 )
 from src.aggregation.total_variance import ClientClassMoment
-from src.privacy.dp_moments import (
-    perturb_client_moment_ldp,
-    project_psd_cone,
-    evaluate_likelihood_ratio_mia,
-)
 
 
 @pytest.fixture
@@ -228,19 +223,4 @@ def test_statistical_discipline_10_seeds():
 
     summary = summarize_multi_seed_comparison(proposed, competitor)
     assert summary["dagger_p001"] is True
-
-
-def test_ldp_moments():
-    """Verify LDP moment perturbation and PSD cone projection."""
-    subs = []
-    for cid in range(6):
-        mu = torch.randn(16) * 0.2
-        covs = [torch.eye(8) * 0.5, torch.eye(8) * 0.5]
-        subs.append(ClientClassMoment(client_id=cid, sample_count=25, mu=mu, block_covs=covs))
-
-    # Test LDP perturbation & PSD projection
-    p_mom = perturb_client_moment_ldp(subs[0], epsilon=2.0, delta=1e-5, seed=42)
-    for b_cov in p_mom.block_covs:
-        eigvals = torch.linalg.eigvalsh(b_cov)
-        assert torch.all(eigvals >= -1e-6), "PSD cone projection failed!"
 

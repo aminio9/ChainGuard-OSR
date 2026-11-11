@@ -1,11 +1,10 @@
-"""Benchmark evaluation suite comparing canonical federated baselines against proposed FedTROS-MC.
+"""Benchmark evaluation suite comparing canonical federated baselines against the proposed method.
 
-Aligned with LaTeX Section 5.3 & Section 6.2 (Tables 4 & 5).
 Baselines:
   - FedAvg (McMahan et al., 2017): Coordinate-wise averaging, empirical cross-entropy, calibrated MSP OSR.
   - FedProx (Li et al., 2020): Proximal parameter-regularized federated learning, Weibull EVT OpenMax OSR.
   - FedProto + Energy: Baseline prototype aggregation with Helmholtz Free Energy OSR.
-  - FedTROS-MC (Proposed): 3-Phase protocol with L_BLA, VIB, Decoupled Aggregation,
+  - Proposed Framework: 3-Phase protocol with L_BLA, VIB, Decoupled Aggregation,
     Law of Total Variance, and Wire-Speed Block-Diagonal Mahalanobis Edge Detector.
 """
 
@@ -48,7 +47,7 @@ from src.metrics.osr_metrics import (
     compute_pr_curve_points,
     compute_roc_curve_points,
 )
-from src.visualization.latex_tables import (
+from src.utils.latex_tables import (
     generate_latex_benchmark_table,
     generate_latex_closed_set_table,
     generate_latex_paper_table2,
@@ -491,7 +490,7 @@ def evaluate_method_configuration(
             loss_val = r_entry.get("train_loss", r_entry.get("loss_bla", 0.0))
             vram_str = f" | VRAM: {torch.cuda.memory_allocated(device)/(1024**2):.0f}MB" if device.type == "cuda" else ""
             print(
-                f"    [FedTROS-MC] Round {r:3d}/{rounds} | Loss: {loss_val:.4f} | Val Acc: {c_acc * 100:.2f}% | "
+                f"    [Proposed] Round {r:3d}/{rounds} | Loss: {loss_val:.4f} | Val Acc: {c_acc * 100:.2f}% | "
                 f"Speed: {r_sec:.2f}s/rnd{vram_str} | Elapsed: {elapsed:.1f}s | ETA: {eta_sec:.1f}s",
                 flush=True,
             )
@@ -1056,17 +1055,17 @@ def run_closed_set_multi_skew_benchmark(
     samples_per_class: Optional[int] = None,
     output_dir: str = "results/closed_set",
 ) -> Dict[float, Dict[str, float]]:
-    """Run closed-set multi-skew benchmark for Proposed FedTROS-MC across Dirichlet skews (Table 2)."""
+    """Run closed-set multi-skew benchmark for Proposed Method across Dirichlet skews."""
     if skews is None:
         skews = [1.0, 0.5, 0.1]
     logger = setup_logger(name="closed_set_multi_skew_runner")
-    logger.info(f"Running Closed-Set Multi-Skew Suite for FedTROS-MC across alpha_D in {skews}...")
+    logger.info(f"Running Closed-Set Multi-Skew Suite for Proposed Method across alpha_D in {skews}...")
 
     results_by_skew: Dict[float, Dict[str, float]] = {}
     for alpha_d in skews:
-        logger.info(f"--> Evaluating Closed-Set FedTROS-MC under alpha_D = {alpha_d}")
+        logger.info(f"--> Evaluating Closed-Set Proposed Method under alpha_D = {alpha_d}")
         metrics = evaluate_method_configuration(
-            "FedTROS-MC (Proposed)",
+            "Proposed Framework",
             "configs/default.yaml",
             rounds=rounds,
             beta_dirichlet=alpha_d,

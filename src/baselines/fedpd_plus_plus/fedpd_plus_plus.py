@@ -106,7 +106,7 @@ class FedPDPlusPlusBaseline(BaseBaseline):
                     logits_known, _ = local_model(x_b)
                     loss_close = criterion_ce(logits_known[:, : self.num_classes], y_b)
 
-                    # PROSER Manifold Mixup (Eq. 4): create pseudo-unknowns between differing classes
+                    # PROSER Manifold Mixup: create pseudo-unknowns between differing classes
                     perm = torch.randperm(x_b.size(0))
                     diff_mask = y_b != y_b[perm]
                     if diff_mask.sum() > 0:
@@ -161,7 +161,7 @@ class FedPDPlusPlusBaseline(BaseBaseline):
                 total_loss += client_loss / steps
                 active_clients += 1
 
-        # Global Divide-and-Conquer Aggregation with Adaptive Soft Masking (Eq. 14-22)
+        # Global Divide-and-Conquer Aggregation with Adaptive Soft Masking
         total_samples = sum(client_sample_sizes)
         if total_samples > 0 and len(client_models) > 0:
             new_state = {}
@@ -194,7 +194,7 @@ class FedPDPlusPlusBaseline(BaseBaseline):
                     sum_share += (w * p_share) * cs
                     weight_share += p_share * cs
 
-                # Global Divide-and-Conquer Aggregation with Adaptive Soft Masking (Eq. 14-22)
+                # Global parameter fusion with soft masking
                 sum_total = sum_close + sum_open + sum_share
                 weight_total = weight_close + weight_open + weight_share
                 fused = torch.where(weight_total > 1e-5, sum_total / weight_total, global_state[key].to(self.device))

@@ -1,4 +1,13 @@
-"""Federated client implementation executing local training and moment extraction (LaTeX Algorithm 1)."""
+"""Federated Client Node (Edge Node).
+
+Executes local node operations:
+    - Representation Learning: Trains local encoder and classification head using composite
+      loss (Balanced Logit Adjustment + VIB KL regularization).
+    - Statistical Profiling: Partitions normal traffic against reference centroids via Voronoi cells
+      and extracts local class moments (mean and block covariances).
+    - Conformal Calibration: Computes local nonconformity histograms over a shared grid.
+    - Edge Inference: Deploys WireSpeedEdgeDetector for real-time open-set detection.
+"""
 
 from __future__ import annotations
 
@@ -38,10 +47,7 @@ def extract_latent_mu(model_or_encoder: nn.Module, x: torch.Tensor) -> torch.Ten
 
 
 class FederatedClient:
-    """Represents a blockchain edge node participating in federated learning.
-
-    Executes Phase I local training (LaTeX Equations 86-89) and Phase II moment extraction (LaTeX Algorithm 1 Lines 333-340).
-    """
+    """Represents a blockchain edge node participating in federated learning."""
 
     def __init__(
         self,
@@ -59,7 +65,7 @@ class FederatedClient:
         self.global_profiles: Optional[Any] = None
         self.edge_detector: Optional[Any] = None
 
-        # Initialize canonical VIB Classifier network (Encoder E_theta + Classifier C_phi)
+        # Initialize canonical VIB Classifier network (Encoder + Classifier)
         self.model = VIBClassifierNetwork(
             in_features=config.model.in_features,
             latent_dim=config.model.latent_dim,
@@ -72,7 +78,7 @@ class FederatedClient:
             stochastic_encoder=config.model.stochastic_encoder,
         ).to(self.device)
 
-        # Local optimizer: SGD with momentum 0.9 (LaTeX Algorithm 1 Line 326) or Adam
+        # Local optimizer: SGD with momentum 0.9 or Adam
         if config.optimization.optimizer.lower() == "sgd":
             self.optimizer = torch.optim.SGD(
                 self.model.parameters(),
@@ -89,7 +95,7 @@ class FederatedClient:
 
         self.loss_calculator = CompositeLossCalculator(config.loss)
 
-        # Count samples per class in local data for Class-Balanced Prior (Equation L_BLA)
+        # Count samples per class in local data for Class-Balanced Logit Adjustment
         labels_np = self.dataset.labels.numpy()
         self.local_classes = np.unique(labels_np)
         self.samples_per_class = np.zeros(len(config.data.known_classes), dtype=int)
@@ -97,16 +103,27 @@ class FederatedClient:
             if c < len(self.samples_per_class):
                 self.samples_per_class[c] = int(np.sum(labels_np == c))
 
-        from src.losses.logit_adjusted import compute_laplace_class_priors
-        laplace_eps = getattr(config.loss, "laplace_eps", 0.1)
-        self.class_priors = compute_laplace_class_priors(
-            self.samples_per_class,
-            num_classes=len(config.data.known_classes),
-            epsilon=laplace_eps,
-            device=self.device,
+        from src.losses.logit_adjusted import (
+            compute_laplace_class_priors,
+            compute_local_class_frequencies,
         )
+        laplace_eps = getattr(config.loss, "laplace_eps", 0.0)
+        if getattr(config.loss, "use_laplace_priors", False) and laplace_eps > 0.0:
+            self.class_priors = compute_laplace_class_priors(
+                self.samples_per_class,
+                num_classes=len(config.data.known_classes),
+                epsilon=laplace_eps,
+                device=self.device,
+            )
+        else:
+            # Normalized local class frequencies for Balanced Logit Adjustment
+            self.class_priors = compute_local_class_frequencies(
+                self.samples_per_class,
+                num_classes=len(config.data.known_classes),
+                device=self.device,
+            )
 
-        # In-VRAM / In-Device direct tensor caching for zero-PCIe training and moment extraction
+        # In-VRAM tensor caching for zero-copy training and moment extraction
         self.features_dev = self.dataset.features.to(self.device, non_blocking=True)
         self.labels_dev = self.dataset.labels.to(self.device, non_blocking=True)
         self.num_samples = self.features_dev.size(0)
@@ -121,7 +138,7 @@ class FederatedClient:
             self.num_cal_samples = 0
 
     def set_learning_rate(self, lr: float) -> None:
-        """Update optimizer learning rate according to Cosine Annealing (LaTeX Equation 93)."""
+        """Update optimizer learning rate according to scheduled decay."""
         for param_group in self.optimizer.param_groups:
             param_group["lr"] = lr
 
@@ -131,7 +148,7 @@ class FederatedClient:
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        """Receive global model parameters w^t = (theta^t, phi^t) from orchestrator (LaTeX Algorithm 1 Line 293)."""
+        """Receive global model parameters from coordinator."""
         # Handle full model state dict or encoder parameters dictionary
         if all(k.startswith("encoder.") or k.startswith("classifier.") for k in global_params.keys()):
             self.model.load_state_dict(global_params)
@@ -169,7 +186,7 @@ class FederatedClient:
         Dict[int, Tuple[torch.Tensor, torch.Tensor, int]],
         Dict[str, float],
     ]:
-        """Execute Phase I local training epochs (LaTeX Algorithm 1 Lines 317-330).
+        """Execute local training epochs.
 
         Returns:
             - updated_model_or_encoder_params: State dict of the updated model
@@ -214,7 +231,7 @@ class FederatedClient:
                 )
 
                 total_loss.backward()
-                # Gradient clipping for numerical stability (LaTeX Section 5.3: max_norm=1.0)
+                # Gradient clipping for numerical stability
                 nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
 
@@ -242,17 +259,17 @@ class FederatedClient:
         class_id: int = 0,
         num_centers: int = 4,
     ) -> Tuple[Optional[torch.Tensor], Optional[List[int]]]:
-        """Extract local candidate representative centers for One-Shot Federated K-Means (Wang et al. 2025).
+        """Extract local candidate representative centers for One-Shot Federated K-Means.
 
-        Mathematical Formulation (LaTeX Algorithm 1, Phase 1):
-            1. Extracts local latent embeddings z_{k,1} for benign multi-modal traffic.
-            2. Computes initial local candidate centers and sample cluster weights via K-Means.
-            3. Uploads only candidate center vectors and scalar weights (Zero Raw Data Leakage).
+        Workflow:
+            1. Extracts local latent embeddings for multi-modal normal traffic.
+            2. Computes initial local candidate centers and cluster counts via K-Means.
+            3. Uploads only candidate centers and scalar weights without exposing raw data.
 
         Args:
             frozen_encoder: Frozen representation extractor.
             class_id: Class index (0 for normal traffic).
-            num_centers: Maximum candidate centers M_1 (default: 4).
+            num_centers: Maximum candidate centers (default: 4).
 
         Returns:
             Tuple of (candidate_centers, sample_counts_per_center).
@@ -299,25 +316,20 @@ class FederatedClient:
         min_cov_samples: Optional[int] = None,
         reference_centers: Optional[Dict[int, torch.Tensor]] = None,
     ) -> List[ClientClassMoment]:
-        """Extract local moments via Voronoi partitioning against global reference centers (Section 4.3, Eq. 4.8).
+        """Extract local moments via Voronoi partitioning against global reference centers.
 
-        Mathematical Formulation:
-            1. Benign Traffic (Mc = 4, Voronoi Partitioning Eq. 4.8 / eq:ch4-voronoi-partition):
-               D_{k,1,m} = { z_i in D_{k,1} | m = argmin_{j in {1, ..., M_1}} ||z_i - c_j||_2^2 }
-               For each active cluster m with N_{k,1,m} >= N_min:
-                   Uploads (mu_{k,1,m}, S_{k,1,m}) with cluster_id = m.
-               If a node did not experience mode m, cluster m is naturally omitted (no artificial fragmentation).
-
-            2. Known Attack Classes (Mc = 1):
-               Directly estimates (mu_{k,c}, S_{k,c}) on whole class samples with cluster_id = 0.
+        Methodology:
+            1. Normal Traffic: Partition local samples into subclusters via nearest reference center
+               and extract local mean and block covariance matrices per subcluster.
+            2. Attack Classes: Estimate moments directly on class samples as single-mode distributions.
 
         Args:
-            frozen_encoder: Permanently frozen global encoder f_{theta^*}.
+            frozen_encoder: Permanently frozen global encoder.
             num_blocks: Number of sub-blocks B (default: 4).
-            block_dim: Dimensionality of each sub-block d_b = d_z / B (default: 16).
+            block_dim: Dimensionality of each sub-block d_b = latent_dim / B.
             alpha: Mondrian conformal significance level.
-            min_cov_samples: Minimum sample count N_min >= 3 required to upload local block covariances.
-            reference_centers: Dict mapping class_id -> global reference centers tensor (M_c, d_z).
+            min_cov_samples: Minimum sample count required to upload local block covariances.
+            reference_centers: Dict mapping class_id -> global reference centers tensor.
 
         Returns:
             List of ClientClassMoment submissions for all present local classes and active clusters.
@@ -352,9 +364,9 @@ class FederatedClient:
             if count < n_min:
                 continue
 
-            z_c = z_all[idx]  # Shape: (count, d_z)
+            z_c = z_all[idx]  # Shape: (count, latent_dim)
 
-            # Check if multi-modal reference centers exist for class c (LaTeX Eq. 4.8 / eq:ch4-voronoi-partition)
+            # Check if multi-modal reference centers exist for class c
             if reference_centers is not None and c in reference_centers and reference_centers[c] is not None:
                 ref_c = reference_centers[c].to(device=self.device)  # Shape: (M_c, d_z)
                 M_c = ref_c.size(0)
@@ -427,16 +439,10 @@ class FederatedClient:
         num_blocks: int = 4,
         block_dim: int = 16,
     ) -> Dict[int, torch.Tensor]:
-        """Compute local nonconformity scores s_{k,j}^{(c)} = D_block(f_{theta^*}(x_{k,j}), c) on D_{cal, k, c} (Section 4.4).
-
-        Privacy note: Unlike Stage 2 moment profiling (which requires N_{k,c} >= N_min = 3 to prevent
-        exact vector reconstruction in R^{d_z}), each scalar distance s_{k,j}^{(c)} in R_{>= 0} is a
-        one-dimensional radial projection onto a (d_z - 1)-dimensional ellipsoid around mu_c and cannot
-        be inverted to recover z_{k,j} in R^{d_z}; hence all nodes with n_{cal, k, c} >= 1 participate
-        in K_{cal, c}.
+        """Compute local nonconformity scores (Mahalanobis distances) on calibration data.
 
         Returns:
-            Dict mapping class c (with n_{cal, k, c} >= 1, i.e., k in K_{cal, c}) -> 1D tensor of scores.
+            Dict mapping class_id -> 1D tensor of nonconformity scores.
         """
         from src.osr.block_mahalanobis import compute_block_mahalanobis_distances
 
@@ -482,7 +488,7 @@ class FederatedClient:
         num_blocks: int = 4,
         block_dim: int = 16,
     ) -> Dict[int, Tuple[np.ndarray, np.ndarray]]:
-        """Compute local right-closed empirical CDF histograms hat{F}_{k,c} on D_{cal, k, c} over shared grid [0, S_{max,c}] (Section 4.4)."""
+        """Compute local empirical CDF histograms on calibration data over a shared grid."""
         from src.osr.conformal import compute_right_closed_histogram
 
         scores_by_class = self.compute_calibration_scores(
@@ -505,11 +511,11 @@ class FederatedClient:
         num_blocks: int = 4,
         block_dim: int = 16,
     ) -> None:
-        """Receive synthesized global profiles from coordinator to configure local edge detector (Phase III, LaTeX Algorithm 2).
+        """Receive synthesized global profiles from coordinator to configure local edge detector.
 
         Args:
             profiles: GlobalClassProfile dictionary mapping class_id -> profile.
-            frozen_encoder: Permanently frozen global encoder theta_g^*.
+            frozen_encoder: Permanently frozen global encoder.
             unknown_label: Label for rejected zero-day anomalies.
             num_blocks: Number of sub-blocks B.
             block_dim: Sub-block dimension d_b.

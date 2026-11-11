@@ -1,7 +1,12 @@
-"""Exact Pooled Covariance Aggregation via Law of Total Variance (Theorem 1).
+"""Global Covariance Reconstruction via the Law of Total Variance.
 
-Reconstructs the exact centralized block-diagonal covariance matrices without transmitting
-any raw feature vectors, mathematically preserving between-client dispersion under label skew.
+Statistical Profiling Pipeline:
+    1. One-Shot Federated K-Means: Determines reference centroids for multi-modal normal traffic
+       by gathering local cluster centers and performing weighted clustering at the coordinator.
+    2. Law of Total Variance (LOTV): Reconstructs exact global covariance matrices by aggregating
+       within-client local covariances and between-client mean dispersion without sharing raw data.
+    3. Oracle Approximating Shrinkage (OAS): Analytically regularizes covariance matrices toward
+       an isotropic target for well-conditioned, stable matrix inversion.
 """
 
 from __future__ import annotations
@@ -12,17 +17,17 @@ import torch
 
 
 class ClientClassMoment(NamedTuple):
-    """Container for client-submitted class moments from eligible nodes k in K_c^{prof} (N_{k,c} >= N_min)."""
+    """Container for client-submitted class moments from eligible nodes."""
 
     client_id: int
     sample_count: int
     mu: torch.Tensor  # Shape: (d_z,)
     block_covs: List[torch.Tensor]  # B tensors of shape (d_b, d_b)
     cal_quantile: Optional[float] = None  # Local (1 - alpha) calibration quantile
-    class_id: Optional[int] = None  # Known class index c in Y_K
+    class_id: Optional[int] = None  # Known class index
     local_prototypes: Optional[torch.Tensor] = None  # Local multi-prototype centroids of shape (M_c, d_z)
     local_proto_counts: Optional[List[int]] = None  # Sample counts per local prototype cluster
-    cluster_id: int = 0  # Subcluster index m in {0, ..., M_c - 1} via Voronoi partitioning (Eq. 4.8)
+    cluster_id: int = 0  # Subcluster index m in {0, ..., M_c - 1} via Voronoi partitioning
 
 
 class GlobalClassProfile(NamedTuple):
@@ -122,20 +127,20 @@ def extract_one_shot_federated_reference_centers(
     num_centers: int = 4,
     random_state: int = 42,
 ) -> torch.Tensor:
-    """Extract global reference centers {c_j}_{j=1}^{M_1} via One-Shot Federated K-Means (Wang et al. 2025).
+    """Extract global reference centers via One-Shot Federated K-Means.
 
-    Mathematical Formulation (LaTeX Algorithm 1, Phase 1):
-        1. Gathers representative candidate centers and sample counts from eligible nodes for multi-modal class.
-        2. Fits weighted K-Means on the coordinator to extract M_1 reference anchor centers.
+    Workflow:
+        1. Gathers candidate centroids and sample counts from eligible nodes for multi-modal traffic.
+        2. Fits weighted K-Means on the coordinator to extract reference anchor centers.
         3. Zero raw-data leakage: only candidate centroids and cluster scalar counts are transmitted.
 
     Args:
         client_candidates: List of (centers, counts) tuples from local nodes.
-        num_centers: Number of global reference modes M_1 (default: 4 for benign traffic).
+        num_centers: Number of global reference modes (default: 4 for normal traffic).
         random_state: RNG seed.
 
     Returns:
-        Tensor of shape (num_centers, d_z) containing global reference centers {c_j}_{j=1}^{M_1}.
+        Tensor of shape (num_centers, latent_dim) containing global reference centers.
     """
     from sklearn.cluster import KMeans
     import numpy as np
@@ -183,32 +188,28 @@ def aggregate_total_variance_moments(
     apply_between_client_dispersion: bool = True,
     min_cov_samples: int = 3,
 ) -> Dict[int, GlobalClassProfile]:
-    """Aggregate local moments into global class profiles via the Law of Total Variance (Section 4.3, Prop. 1).
+    """Aggregate local moments into global class profiles via the Law of Total Variance.
 
-    Mathematical Formulation (LaTeX Section 4.3 & 4.5.1):
-        1. Single-Prototype Classes (Mc = 1, e.g. known attacks):
-           mu_c = sum_{k in K_c} w_k mu_{k,c}   (Eq. 4.1)
-           Sigma_{c,b} = sum_{k in K_c} w_k [S_{k,c,b} + (mu_{k,c,b} - mu_{c,b})(mu_{k,c,b} - mu_{c,b})^T]  (Eq. 4.2)
-           Regularized via OAS shrinkage: tilde{Sigma}_{c,b} = (1 - rho_{c,b}) Sigma_{c,b} + ... (Eq. 4.3 & 4.4)
+    Formulation:
+        1. Single-Prototype Classes (known attacks):
+           Global centroid: mu_c = sum_k w_k mu_{k,c}
+           Global covariance: Sigma_c = sum_k w_k [S_{k,c} + (mu_{k,c} - mu_c)(mu_{k,c} - mu_c)^T]
+           Regularized via OAS shrinkage toward an isotropic diagonal target.
 
-        2. Multi-Prototype Benign Traffic (M1 = 4, Voronoi Partitioning Eq. 4.8 / eq:ch4-voronoi-partition):
-           For each sub-cluster m in {1, ..., M_1}:
-               mu_{1,m} = sum_{k in K_1} w_k^{(1,m)} mu_{k,1,m}
-               Sigma_{1,m,b} = sum_{k in K_1} w_k^{(1,m)} [S_{k,1,m,b} + (mu_{k,1,m,b} - mu_{1,m,b})(mu_{k,1,m,b} - mu_{1,m,b})^T]
-           Common intra-cluster covariance across all 4 sub-clusters (Section 4.5.1):
-               Sigma_{1,b} = sum_{m=1}^{M_1} (N_{1,m} / N_1) Sigma_{1,m,b}
-           Regularized via OAS shrinkage: tilde{Sigma}_{1,b} from total normal sample count N_1.
+        2. Multi-Prototype Benign Traffic (normal operational phases):
+           For each sub-cluster m:
+               mu_{1,m} = sum_k w_k^{(1,m)} mu_{k,1,m}
+               Sigma_{1,m} = sum_k w_k^{(1,m)} [S_{k,1,m} + (mu_{k,1,m} - mu_{1,m})(mu_{k,1,m} - mu_{1,m})^T]
+           Each subcluster maintains its own independent OAS-stabilized covariance matrix.
 
     Args:
-        class_submissions: Dict mapping class_id -> list of ClientClassMoment from eligible nodes K_c^{prof}.
+        class_submissions: Dict mapping class_id -> list of ClientClassMoment from eligible nodes.
         num_blocks: Number of diagonal sub-blocks B (default: 4).
-        block_dim: Dimensionality of each sub-block d_b = d_z / B.
-        tikhonov_eps: Tikhonov regularization parameter eps_v > 0 (default: 1e-4).
-        apply_between_client_dispersion: If True (default), includes the Law of Total
-            Variance outer-product dispersion term. If False, computes naive within-client
-            average covariance (Ablation).
-        min_cov_samples: Minimum local sample count N_min >= 3 required for a node to
-            contribute to profiling (K_c^{prof}).
+        block_dim: Dimensionality of each sub-block d_b = latent_dim / B.
+        tikhonov_eps: Tikhonov regularization parameter (default: 1e-3).
+        apply_between_client_dispersion: If True, includes the Law of Total Variance outer-product
+            dispersion term. If False, computes naive within-client average covariance.
+        min_cov_samples: Minimum local sample count required for a node to contribute to profiling.
 
     Returns:
         Dict mapping class_id -> GlobalClassProfile.
@@ -235,7 +236,7 @@ def aggregate_total_variance_moments(
         is_multi_cluster = len(cluster_ids) > 1 or (len(cluster_ids) == 1 and cluster_ids[0] > 0)
 
         if is_multi_cluster:
-            # Multi-Prototype LOTV with Common Within-Cluster Covariance (LaTeX Section 4.5.1)
+            # Multi-prototype covariance reconstruction for subclusters
             cluster_means: List[torch.Tensor] = []
             cluster_covs_per_block: List[List[torch.Tensor]] = [[] for _ in range(curr_b)]  # block -> list of M_c covs
             cluster_sample_counts: List[int] = []
@@ -255,7 +256,7 @@ def aggregate_total_variance_moments(
                 mu_c_m = w_m_sum / float(max(n_c_m, 1))
                 cluster_means.append(mu_c_m)
 
-                # Reconstruct Sigma_{c,m,b} via LOTV (Eq. 4.2)
+                # Reconstruct subcluster covariance Sigma_{c,m,b} via Law of Total Variance
                 for b in range(curr_b):
                     start_idx = b * curr_db
                     end_idx = start_idx + curr_db
@@ -288,7 +289,30 @@ def aggregate_total_variance_moments(
                 dim=0,
             ) / n_c_total
 
-            # Weighted average across sub-clusters for common within-cluster covariance (LaTeX Section 4.5.1)
+            # Reconstruct per-subcluster independent OAS-stabilized covariances
+            proto_inv_block_covs: List[List[torch.Tensor]] = []
+            for m in range(len(cluster_means)):
+                n_m = cluster_sample_counts[m]
+                m_inv_blocks: List[torch.Tensor] = []
+                for b in range(curr_b):
+                    cov_m_b = cluster_covs_per_block[b][m]
+                    cov_sym_m_b = 0.5 * (cov_m_b + cov_m_b.t())
+                    if tikhonov_eps > 0.0:
+                        sigma_m_b, _ = compute_server_side_oas_shrinkage(
+                            cov_sym_m_b, int(max(n_m, 1)), tikhonov_eps=tikhonov_eps
+                        )
+                    else:
+                        sigma_m_b = cov_sym_m_b
+
+                    try:
+                        inv_sigma_m_b = torch.linalg.inv(sigma_m_b)
+                    except RuntimeError:
+                        inv_sigma_m_b = torch.linalg.pinv(sigma_m_b)
+
+                    m_inv_blocks.append(inv_sigma_m_b)
+                proto_inv_block_covs.append(m_inv_blocks)
+
+            # Reconstruct pooled average across sub-clusters for legacy single-centroid fallback
             global_block_covs: List[torch.Tensor] = []
             inv_block_covs: List[torch.Tensor] = []
 
@@ -312,8 +336,6 @@ def aggregate_total_variance_moments(
                 global_block_covs.append(sigma_c_b)
                 inv_block_covs.append(inv_sigma_c_b)
 
-            proto_inv_block_covs = [inv_block_covs for _ in range(prototypes_tensor.size(0))]
-
             profiles[c] = GlobalClassProfile(
                 class_id=c,
                 total_samples=total_samples,
@@ -325,7 +347,7 @@ def aggregate_total_variance_moments(
                 proto_inv_block_covs=proto_inv_block_covs,
             )
         else:
-            # Single-Prototype LOTV Aggregation (LaTeX Section 4.3, Mc = 1)
+            # Single-prototype covariance reconstruction for unimodal classes (attacks)
             prof_subs = [s for s in active_subs if s.sample_count >= min_cov_samples]
             if not prof_subs:
                 prof_subs = active_subs

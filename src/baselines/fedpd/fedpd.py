@@ -23,7 +23,7 @@ def compute_taylor_importance(
     model: nn.Module,
     loss: torch.Tensor,
 ) -> Dict[str, torch.Tensor]:
-    """Compute first-order Taylor expansion parameter importance (Eq. 3): Omega = |grad(w) * w|."""
+    """Compute first-order Taylor expansion parameter importance: Omega = |grad(w) * w|."""
     model.zero_grad()
     loss.backward(retain_graph=True)
     importance: Dict[str, torch.Tensor] = {}
@@ -36,7 +36,7 @@ def compute_taylor_importance(
 
 
 def generate_binary_mask(importance: Dict[str, torch.Tensor], top_ratio: float = 0.5) -> Dict[str, torch.Tensor]:
-    """Generate binary parameter mask selecting top-k important parameters (Eq. 6-7)."""
+    """Generate binary parameter mask selecting top-k important parameters."""
     masks: Dict[str, torch.Tensor] = {}
     for name, imp in importance.items():
         flat = imp.view(-1)
@@ -124,7 +124,7 @@ class FedPDBaseline(BaseBaseline):
                     logits, z = local_model(x_b)
                     loss_close = criterion_ce(logits, y_b)
 
-                    # Boundary entropy constraint for open space (Eq. 1)
+                    # Boundary entropy constraint for open space
                     probs = torch.softmax(logits, dim=-1)
                     loss_open = -torch.mean(torch.sum(probs * torch.log(probs + 1e-8), dim=-1))
 
@@ -160,7 +160,7 @@ class FedPDBaseline(BaseBaseline):
                 total_loss += client_loss / steps
                 active_clients += 1
 
-        # Global Divide-and-Conquer Aggregation (GDCA - Eq. 8-10, 22)
+        # Global Divide-and-Conquer Aggregation (GDCA)
         total_samples = sum(client_sample_sizes)
         if total_samples > 0 and len(client_models) > 0:
             new_state = {}
@@ -194,7 +194,7 @@ class FedPDBaseline(BaseBaseline):
                     sum_share += (w * p_share) * cs
                     weight_share += p_share * cs
 
-                # Global Divide-and-Conquer Aggregation (GDCA - Eq. 8-10, 22)
+                # Global parameter fusion
                 sum_total = sum_close + sum_open + sum_share
                 weight_total = weight_close + weight_open + weight_share
                 fused = torch.where(weight_total > 0, sum_total / weight_total, global_state[key].to(self.device))

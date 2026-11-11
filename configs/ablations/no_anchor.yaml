@@ -1,5 +1,0 @@
-ablation_name: "no_anchor"
-description: "Ablation A3: Remove Dynamic Global Anchor Regularization (lambda_anchor = 0)"
-overrides:
-  loss:
-    lambda_anchor: 0.0

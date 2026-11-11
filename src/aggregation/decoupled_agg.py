@@ -1,11 +1,12 @@
-"""Decoupled Server Aggregation (LaTeX Section 4.2.3, Equations for Decoupled Aggregation).
+"""Decoupled Server Aggregation.
 
 Decouples Feature Representation Learning (Encoder theta) from Classification Head (psi):
     1. Global Encoder:
-       theta_g^{t+1} = sum_{k=1}^K (n_k / N) * theta_k^{t+1}
-    2. Global Classifier Head (Row-wise per class c in C_K):
-       psi_{g, c}^{t+1} = sum_{k in K_c} (n_c^{(k)} / N_c) * psi_{k, c}^{t+1}
-       where K_c = {k | n_c^{(k)} > 0} and N_c = sum_{k in K_c} n_c^{(k)}.
+       Aggregated via standard sample-weighted averaging across all participating nodes:
+       theta_global = sum_k (n_k / N) * theta_k
+    2. Global Classifier Head (Row-wise per known class c):
+       Aggregated using class-specific weights only across nodes that observed class c:
+       psi_{global, c} = sum_{k in K_c} (n_{k,c} / N_c) * psi_{k, c}
 """
 
 from __future__ import annotations

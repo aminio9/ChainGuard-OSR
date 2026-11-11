@@ -92,7 +92,7 @@ class FedOSSBaseline(BaseBaseline):
         dataset: FlowDataset,
         batch_size: int = 64,
     ) -> Optional[TensorDataset]:
-        """Perform DUSS boundary recognition and inversion updating (Eq. 1-2)."""
+        """Perform DUSS boundary recognition and inversion updating."""
         if len(self.personalized_bank) < 2 or len(dataset) < 4:
             return None
 
@@ -100,7 +100,7 @@ class FedOSSBaseline(BaseBaseline):
         x_all = dataset.features.to(self.device)
         y_all = dataset.labels.to(self.device)
 
-        # 1. Compute discrepancy score s(x_i) via personalized bank (Eq. 1)
+        # 1. Compute discrepancy score s(x_i) via personalized bank
         with torch.no_grad():
             z_all, _, _ = model.encoder(x_all)
             votes = torch.zeros(x_all.size(0), device=self.device)
@@ -123,7 +123,7 @@ class FedOSSBaseline(BaseBaseline):
         x_boundary = x_all[boundary_idx].clone().detach().requires_grad_(True)
         y_boundary = y_all[boundary_idx]
 
-        # 2. Inversion updating via gradient ascent on known CE risk (Eq. 2)
+        # 2. Inversion updating via gradient ascent on known CE risk
         ce_loss = nn.CrossEntropyLoss()
         for _ in range(self.inversion_steps):
             z_b, _, _ = model.encoder(x_boundary)

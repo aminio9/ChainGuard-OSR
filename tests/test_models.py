@@ -1,4 +1,4 @@
-"""Tests for model architectures: VIB stochastic encoder and classification head (LaTeX Section 4.1)."""
+"""Tests for model architectures: VIB stochastic encoder and classification head."""
 
 import torch
 from src.models.encoder import VIBEncoder, DeterministicEncoder

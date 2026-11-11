@@ -111,9 +111,8 @@ def test_hungarian_prototype_alignment_resolves_permutation_ambiguity():
 
 
 def test_one_shot_federated_voronoi_multimodal_lotv():
-    """Verify LaTeX Algorithm 1 & Section 4.5.1:
-    One-Shot Federated K-Means reference center extraction, Voronoi partitioning (Eq. 4.8),
-    and multi-cluster LOTV with common within-cluster covariance.
+    """Verify one-shot federated reference center extraction, Voronoi partitioning,
+    and multi-cluster LOTV covariance aggregation.
     """
     from src.aggregation.total_variance import (
         extract_one_shot_federated_reference_centers,

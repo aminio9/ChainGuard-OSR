@@ -10,7 +10,7 @@ def generate_latex_benchmark_table(
     caption: str = "Comparison of Intrusion Detection Performance under Extreme Non-IID Setting",
     label: str = "tab:benchmark_results",
 ) -> str:
-    """Generate publication-ready LaTeX table matching paper Table 5 (Section 6.3)."""
+    """Generate publication-ready LaTeX table for benchmark comparisons."""
     latex = [
         r"\begin{table*}[t]",
         r"\centering",
@@ -50,7 +50,7 @@ def generate_latex_loao_table(
     caption: str = "Leave-One-Attack-Out Evaluation across Distinct Held-Out Attack Types",
     label: str = "tab:loao_results",
 ) -> str:
-    """Generate publication-ready LaTeX table matching paper Table 6 (Section 6.5)."""
+    """Generate publication-ready LaTeX table for Leave-One-Attack-Out evaluation."""
     latex = [
         r"\begin{table}[t]",
         r"\centering",
@@ -89,7 +89,7 @@ def generate_latex_bla_ablation_table(
     caption: str = "Logit-Adjusted Balanced Risk Minimization Ablation Study",
     label: str = "tab:anchor_ablation",
 ) -> str:
-    """Generate publication-ready LaTeX table matching paper Table 3 (Section 6.5.2)."""
+    """Generate publication-ready LaTeX table for balanced risk minimization ablation."""
     latex = [
         r"\begin{table}[t]",
         r"\centering",
@@ -131,7 +131,7 @@ def generate_latex_closed_set_table(
     caption: str = "Closed-Set Intrusion Detection Classification Performance",
     label: str = "tab:closed_set_results",
 ) -> str:
-    """Generate publication-ready LaTeX table for closed-set classification (Section 6.2, Table 1)."""
+    """Generate publication-ready LaTeX table for closed-set classification."""
     latex = [
         r"\begin{table}[t]",
         r"\centering",
@@ -167,7 +167,7 @@ def generate_latex_multi_skew_closed_set_table(
     caption: str = "Closed-set classification performance under varying Dirichlet label skew",
     label: str = "tab:noniid_closed_results",
 ) -> str:
-    """Generate publication-ready LaTeX table for multi-skew closed-set classification (Section 6.2, Table 2)."""
+    """Generate publication-ready LaTeX table for multi-skew closed-set classification."""
     latex = [
         r"\begin{table}[t]",
         r"\centering",
@@ -209,7 +209,7 @@ def generate_latex_paper_table2(
     caption: str = "Closed-set B-NAT classification performance under varying Dirichlet label skew ($\\alpha_D \\in \\{1.0, 0.5, 0.1\\}$)",
     label: str = "tab:noniid_closed_results",
 ) -> str:
-    """Generate exact publication-ready LaTeX table for paper Table 2 (Section 6.2)."""
+    """Generate publication-ready LaTeX table for classification under skew."""
     latex = [
         r"\begin{table}[pos=t]",
         r"\centering",

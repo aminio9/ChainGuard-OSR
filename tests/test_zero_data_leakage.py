@@ -1,4 +1,4 @@
-"""Comprehensive verification tests for Zero Data Leakage (LaTeX Section 5.1).
+"""Comprehensive verification tests for Zero Data Leakage.
 
 Validates the 5 fundamental zero-leakage invariants:
 1. Index Disjointness: D_train, D_cal, and D_test have empty pairwise intersection.
@@ -205,7 +205,7 @@ def test_zero_leakage_closed_set_evaluation_discipline():
     from experiments.run_baselines import evaluate_method_configuration
 
     metrics = evaluate_method_configuration(
-        method_name="FedTROS-MC (Proposed)",
+        method_name="Proposed Framework",
         config_path="configs/default.yaml",
         rounds=1,
         beta_dirichlet=None,

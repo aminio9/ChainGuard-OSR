@@ -1,9 +1,11 @@
-"""Canonical VIB Feature Encoder and Classifier Architecture (LaTeX Section 4.1, Equations 32 & 41).
+"""Variational Information Bottleneck (VIB) Neural Architecture.
 
-Model:
-    1. Feature Encoder E_theta: Maps flow x in R^{d_x} to latent parameters mu(x), logvar(x) in R^{d_z}.
-       Stochastic latent vector z = mu(x) + epsilon * sigma(x) via reparameterization (Equation 41).
-    2. Classifier Head C_phi: Linear projection g_phi(z) to unnormalized class logits in R^{|C_K|} (Equation 32).
+Components:
+    1. Feature Encoder: Maps raw flow features x into latent Gaussian parameters (mean mu, log-variance).
+       During training, latent vectors z are sampled using the Gaussian reparameterization trick.
+       During inference, the deterministic mean vector mu(x) is extracted directly.
+    2. Auxiliary Classification Head: Used during representation learning to structure the latent
+       space, and discarded once the encoder is frozen for open-set detection.
 """
 
 from __future__ import annotations
@@ -18,11 +20,11 @@ from src.models.heads import ClassificationHead
 
 
 class VIBClassifierNetwork(BaseNetwork):
-    """Canonical representation learning backbone for FedTROS-MC (LaTeX Section 4.1)."""
+    """Federated representation learning model combining a VIB encoder with an auxiliary classifier."""
 
     def __init__(
         self,
-        in_features: int = 34,
+        in_features: int = 31,
         latent_dim: int = 64,
         num_classes: int = 4,
         hidden_dim: int = 128,
@@ -31,7 +33,7 @@ class VIBClassifierNetwork(BaseNetwork):
         use_layernorm: bool = True,
         activation: str = "gelu",
         stochastic_encoder: bool = True,
-        **kwargs,  # Gracefully ignore any legacy kwargs like density_dim
+        **kwargs,
     ):
         super().__init__()
         self.in_features = in_features
@@ -39,7 +41,7 @@ class VIBClassifierNetwork(BaseNetwork):
         self.num_classes = num_classes
         self.stochastic_encoder = stochastic_encoder
 
-        # 1. Feature Encoder E_theta (Equation 41)
+        # Encoder branch (stochastic VIB or deterministic baseline)
         if stochastic_encoder:
             self.encoder = VIBEncoder(
                 in_features=in_features,
@@ -61,23 +63,19 @@ class VIBClassifierNetwork(BaseNetwork):
                 activation=activation,
             )
 
-        # 2. Known-Class Classifier Head C_phi (Equation 32)
+        # Auxiliary classifier head for supervised guidance
         self.classifier = ClassificationHead(latent_dim=latent_dim, num_classes=num_classes)
 
     def forward(
         self, x: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Forward pass through VIB encoder and classification head.
-
-        Returns:
-            (logits, z, mu, logvar)
-        """
+        """Forward pass for local training: returns (logits, z, mu, logvar)."""
         z, mu, logvar = self.encoder(x)
         logits = self.classifier(z)
         return logits, z, mu, logvar
 
     def classify(self, x: torch.Tensor) -> torch.Tensor:
-        """Deterministic evaluation: compute logits directly from mean latent embedding."""
+        """Deterministic evaluation: computes logits directly from the mean embedding mu(x)."""
         if hasattr(self.encoder, "deterministic_forward"):
             mu = self.encoder.deterministic_forward(x)
         else:
@@ -86,7 +84,7 @@ class VIBClassifierNetwork(BaseNetwork):
         return self.classifier(mu)
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Deterministic evaluation: extract mean embedding vector z = mu(x; theta)."""
+        """Extract deterministic latent mean representation z = mu(x) for statistical profiling."""
         if hasattr(self.encoder, "deterministic_forward"):
             return self.encoder.deterministic_forward(x)
         out = self.encoder(x)

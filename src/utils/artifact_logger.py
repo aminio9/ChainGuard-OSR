@@ -190,10 +190,7 @@ def export_round_telemetry_jsonl(
     beta: Optional[float] = None,
     extra_meta: Optional[Dict[str, Any]] = None,
 ) -> Path:
-    """Save round-by-round training telemetry to runs_telemetry/{experiment_id}_seed{seed}.jsonl.
-    
-    Conforms directly to Section 12 Structured Data & Logging Architecture.
-    """
+    """Save round-by-round training telemetry to runs_telemetry/{experiment_id}_seed{seed}.jsonl."""
     telemetry_dir = Path(output_root) / "runs_telemetry"
     telemetry_dir.mkdir(parents=True, exist_ok=True)
     
@@ -233,7 +230,6 @@ def export_plot_structured_artifacts(
 ) -> Path:
     """Save compact numeric numpy arrays to structured_artifacts/{artifact_name}.npz.
     
-    Conforms directly to Section 12 Structured Data & Logging Architecture (Tier C).
     Enables instant plotting without re-running models or raw log parsing.
     """
     artifacts_dir = Path(output_root) / "structured_artifacts"

@@ -1,25 +1,16 @@
 """
-Master Chapter 5 Experimental Benchmark Suite (100% Data, 100 Rounds, 10 Clients)
-Strictly Aligned with Chapter 4 Multi-Phase Architecture and Chapter 5 Evaluation Tables.
+Master Experimental Benchmark Suite.
+Executes federated training, moment profiling, and conformal calibration.
 
-Datasets:
-  1. B-NAT (Ethereum DEVp2p Traffic, 45 features, 210,000 flows)
-  2. CIC-IDS2017 (Network Flow IDS, 78 features, 20,117 stratified flows)
-  3. ToN-IoT (Industrial IoT Network, 44 features, 183,560 flows)
-
-Evaluations Covered:
-  - Table 5.1: Dataset Statistics & Protocol Partitioning
-  - Table 5.2: Closed-Set Evaluation across 4 Dirichlet Skews (IID, beta=0.5, 0.1, 0.05) - 100 Rounds
-  - Table 5.3: Open-Set Evaluation (OSR) across 4 Dirichlet Skews (FoT Sequestered) - 100 Rounds
-  - Table 5.4: Cross-Dataset Generalization (B-NAT, CIC-IDS2017, ToN-IoT) - 50-100 Rounds
-  - Table 5.5: Leave-One-Attack-Out (LOAO) Rotation (FoT, BP, DoS, MitM) - 100% Genuine OSR
-  - Table 5.6: Client Scaling Benchmark (K in {5, 10, 20, 50})
-  - Table 5.7: Wire-Speed Edge Profiling (Latency, Throughput, Memory, Speedup)
-  - Figure 5.1: Dirichlet Non-IID Distribution 1x4 Panel
-  - Figure 5.2: Convergence and Loss Trajectory (Sample-Weighted Loss)
-  - Figure 5.3: Latent Space Geometry Comparison (t-SNE & Voronoi Ellipses)
-  - Figure 5.4: Conformal Nonconformity Score Density & Alpha-Sweep
-  - Figure 5.5: Ablation Attribution Forest Plot (M1 - M5)
+Evaluations:
+  - Protocol Partitioning and Dataset Statistics (B-NAT, CIC-IDS2017, ToN-IoT)
+  - Closed-Set Evaluation across Dirichlet Skews (IID, beta=0.5, 0.1, 0.05)
+  - Open-Set Recognition (OSR) across Dirichlet Skews
+  - Cross-Dataset Generalization
+  - Leave-One-Attack-Out (LOAO) Rotation
+  - Client Scalability Benchmark (K in {5, 10, 20, 50})
+  - Wire-Speed Edge Profiling (Latency, Throughput, Memory, Speedup)
+  - Diagnostic Figures: Dirichlet distribution, convergence, latent geometry, conformal score density, ablation forest plot.
 """
 
 import os
@@ -699,26 +690,11 @@ def run_master_suite():
         json.dump(master_results, f, indent=2)
     print(f"\n[EXPORT] Master JSON results saved to: {json_path}")
 
-    # Invoke Original Local Plot Generators
-    print("  Executing Original Local Plot Generators from Real_Run/Plots...")
-    plots_scripts_dir = Path("D:/PAPER/Real_Run/Plots")
-    for scr_name in [
-        "generate_fig_e1_convergence.py",
-        "generate_latent_geometry_comparison.py",
-        "generate_conformal_score_distribution.py",
-        "generate_ablation_forest_plot.py",
-        "generate_wire_speed_ecdf.py",
-    ]:
-        scr_path = plots_scripts_dir / scr_name
-        if scr_path.exists():
-            subprocess.run([sys.executable, str(scr_path)], check=False)
-            print(f"    -> Executed {scr_name}")
-
     # =========================================================================
     # PART 8: Export Complete LaTeX Tables
     # =========================================================================
     print("\n" + "#" * 90)
-    print("PART 8: EXPORTING CLEAN LATEX TABLES READY FOR CHAPTER 5")
+    print("PART 8: EXPORTING LATEX TABLES")
     print("#" * 90)
 
     # Table 5.1 LaTeX

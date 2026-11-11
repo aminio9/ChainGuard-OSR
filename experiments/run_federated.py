@@ -35,10 +35,6 @@ from src.osr.block_mahalanobis import WireSpeedEdgeDetector
 from src.metrics.classification import compute_classification_metrics
 from src.metrics.osr_metrics import compute_osr_metrics
 from src.metrics.conformal_metrics import compute_conformal_metrics
-from src.visualization.publication_plots import (
-    plot_convergence_curves,
-    plot_conformal_set_distribution,
-)
 
 
 def run_experiment(
@@ -186,8 +182,6 @@ def run_experiment(
 
     # Persist Artifacts and Plots
     tracker.finish_run(final_results=final_results)
-    plot_convergence_curves(tracker.history, tracker.run_dir / "convergence.png")
-    # plot_conformal_set_distribution(conf_sets, tracker.run_dir / "conformal_distribution.png")
     logger.info(f"Experiment finished successfully! Results saved to: {tracker.run_dir}")
 
 

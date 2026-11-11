@@ -1,4 +1,10 @@
-"""Open-Set Recognition (OSR) and Conformal Prediction: Block-Diagonal Mahalanobis and Mondrian Conformal (LaTeX Section 4.2-4.4)."""
+"""Open-Set Recognition (OSR) and Conformal Prediction.
+
+Modules:
+    - Block-Diagonal and Multi-Centroid Mahalanobis metric inference (WireSpeedEdgeDetector)
+    - Distributed Mondrian Conformal Calibration (MondrianConformalCalibrator)
+    - Baseline OOD methods (Weibull EVT, Free Energy score)
+"""
 
 from src.osr.weibull_evt import WeibullEVTFitter, compute_evt_probabilities
 from src.osr.energy_ood import compute_free_energy_score
@@ -12,6 +18,7 @@ from src.osr.block_mahalanobis import (
     MahalanobisInferenceResult,
     compute_block_mahalanobis_distances,
 )
+from src.osr.multimodal_mahalanobis import compute_multimodal_mahalanobis_distances
 
 __all__ = [
     "WeibullEVTFitter",
@@ -23,4 +30,5 @@ __all__ = [
     "WireSpeedEdgeDetector",
     "MahalanobisInferenceResult",
     "compute_block_mahalanobis_distances",
+    "compute_multimodal_mahalanobis_distances",
 ]

@@ -1,6 +1,6 @@
 """Tabular loader and preprocessor for real intrusion detection benchmarks.
 
-Supports all 4 paper benchmarks (Section 5.1 & Table 2):
+Supports benchmarks:
   1. B-NAT (Blockchain Network Attack Traffic)
   2. B-TAT (Blockchain Transaction and Attack Traffic)
   3. ToN-IoT (Industrial IoT Telemetry and Network Flow)

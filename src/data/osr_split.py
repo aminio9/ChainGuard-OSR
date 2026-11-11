@@ -45,7 +45,7 @@ def split_open_set_dataset(
         cal_ratio: Fraction of known data allocated to calibration (default 0.10 for 'full').
         seed: Random seed for deterministic reproducibility.
         protocol: 'full' (70/10/20 of entire dataset, zero subsampling).
-        standardize_from_train: If True, applies Eq. 52 zero-leakage standardization using
+        standardize_from_train: If True, applies zero-leakage standardization using
                                 mean and variance estimated exclusively on training records.
 
     Returns:
@@ -122,7 +122,7 @@ def split_open_set_dataset(
         test_closed_ds = FlowDataset(torch.from_numpy(test_closed_feats_np), _remap(test_known_indices))
         test_open_ds = FlowDataset(torch.from_numpy(test_open_feats_np), _remap(open_indices))
     else:
-        # Zero-leakage standardization (Eq. 52): Fit strictly on known training records
+        # Zero-leakage standardization: Fit strictly on known training records
         if standardize_from_train and len(train_indices) > 0:
             train_feats = features[torch.tensor(train_indices, dtype=torch.long)]
             mean = torch.mean(train_feats, dim=0, keepdim=True)
@@ -183,9 +183,9 @@ def audit_zero_data_leakage(
     test_known_indices: List[int],
     test_unknown_indices: List[int],
 ) -> dict:
-    """Cryptographic-grade mathematical audit guaranteeing zero data leakage (LaTeX Section 5.1).
+    """Cryptographic-grade mathematical audit guaranteeing zero data leakage.
 
-    Enforces 5 non-negotiable invariants required by top-tier Q1 venues:
+    Enforces 5 non-negotiable invariants:
     1. Pairwise Disjoint Partitioning: Intersection between train, cal, test-known, and test-unknown is strictly empty.
     2. Zero Unknown Contamination: Training, calibration, and closed-set test partitions contain EXACTLY zero unknown zero-day samples.
     3. Proper Open-Set Construction: Open-set test contains all sequestered unknown zero-day attacks alongside known test traffic.

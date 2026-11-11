@@ -1,7 +1,15 @@
-"""Linear-Time Block-Diagonal Mahalanobis Nonconformity Metric and Decision Engine (Equations 19-21 & 27 / Algorithm 2).
+"""Multi-Centroid Mahalanobis Metric and Open-Set Edge Inference.
 
-Achieves wire-speed (<0.25 ms) edge intrusion detection and zero-day threat interception
-by evaluating block-diagonal elliptic distances across B independent sub-blocks.
+Mechanisms:
+    1. Single-Centroid Attack Distance: Quadratic Mahalanobis form to attack centroid.
+    2. Multi-Centroid Normal Traffic Distance: Minimum Mahalanobis distance across all
+       normal traffic subclusters (session handshake, ledger sync, tx propagation, block announce).
+    3. Conformal Prediction Set: Set of candidate classes whose Mahalanobis distance falls
+       within their calibrated Mondrian threshold.
+    4. Open-Set Decision Rule:
+       - If the conformal set is empty: Reject as zero-day / unknown intrusion.
+       - If the conformal set is non-empty: Classify as the candidate class that minimizes
+         the normalized distance (distance / threshold).
 """
 
 from __future__ import annotations
@@ -12,10 +20,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from src.aggregation.total_variance import GlobalClassProfile
-from src.osr.conformal import (
-    ThreeWayConformalDecisionResult,
-    compute_three_way_conformal_decision,
-)
 
 
 class MahalanobisInferenceResult(NamedTuple):
@@ -141,9 +145,10 @@ def compute_block_mahalanobis_distances(
 
 
 class WireSpeedEdgeDetector:
-    """Real-Time Edge Detector implementing Section 4.4 with finite-sample conformal guarantees.
+    """Real-Time Edge Detector with finite-sample conformal guarantees.
 
-    Complexity: O(C * d_z * d_b), runtime < 0.25 ms.
+    Provides ultra-low latency classification for known attacks and normal traffic,
+    while reliably flagging zero-day exploits as unknown.
     """
 
     def __init__(
@@ -155,8 +160,6 @@ class WireSpeedEdgeDetector:
         block_dim: int = 64,
         normalize_features: bool = False,
         metric_type: str = "mahalanobis",
-        tau_accept_map: Optional[Dict[int, float]] = None,
-        tau_reject_map: Optional[Dict[int, float]] = None,
     ) -> None:
         self.encoder = frozen_encoder
         self.encoder.eval()
@@ -166,24 +169,17 @@ class WireSpeedEdgeDetector:
         self.block_dim = block_dim
         self.normalize_features = normalize_features
         self.metric_type = metric_type
-        self.tau_reject_map = tau_reject_map or {
-            c: float(p.conformal_threshold) for c, p in global_profiles.items()
-        }
-        self.tau_accept_map = tau_accept_map or {}
 
     @torch.no_grad()
     def predict_sample(self, x: torch.Tensor) -> MahalanobisInferenceResult:
-        """Execute Section 4.4 decision rule for a single input flow vector x.
+        """Execute open-set decision rule for a single input flow vector x.
 
-        Steps (Section 4.4, Eq. eq:osr_decision_rule):
-            1. z_test = f_{theta^*}(x_test) = m_{theta^*}(x_test)
-            2. Compute D_block(z_test, c) for all c in Y_K
-            3. hat{y}(x_test) = argmin_{c in Y_K} D_block(z_test, c) / tau_{alpha, c}
-            4. S(x_test) = min_{c in Y_K} D_block(z_test, c) / tau_{alpha, c}
-                         = D_block(z_test, hat{y}(x_test)) / tau_{alpha, hat{y}(x_test)}
-            5. Reject as Unknown iff S(x_test) > 1 (equivalently D_block(z_test, hat{y}(x_test)) > tau_{alpha, hat{y}(x_test)},
-               i.e., C_{1-alpha}(x_test) == empty since 0 < tau_{alpha, c} < inf for all c in Y_K)
-            6. Else: return hat{y}(x_test)
+        Pipeline:
+            1. Extract deterministic latent representation z = mu(x) from frozen encoder.
+            2. Compute Mahalanobis distance D_c(z) to each known class.
+            3. Construct conformal acceptance set C(z) = { c | D_c(z) <= threshold_c }.
+            4. If C(z) is empty: Reject sample as unknown / zero-day intrusion.
+            5. Else: Assign to the candidate class in C(z) that minimizes D_c(z) / threshold_c.
         """
         try:
             device = next(self.encoder.parameters()).device
@@ -193,13 +189,12 @@ class WireSpeedEdgeDetector:
             x = x.unsqueeze(0)
         x = x.to(device)
 
-        # Line 1: Deterministic forward pass z = mu(x)
+        # Deterministic forward pass z = mu(x)
         if hasattr(self.encoder, "extract_features"):
             mu = self.encoder.extract_features(x)
         else:
             output = self.encoder(x)
             if isinstance(output, tuple):
-                # VIBClassifierNetwork returns (logits, z, mu, logvar)
                 if len(output) == 4:
                     mu = output[2] if output[2] is not None else output[1]
                 elif len(output) >= 5:
@@ -209,9 +204,9 @@ class WireSpeedEdgeDetector:
             else:
                 mu = output
 
-        z_test = mu.squeeze(0)  # Shape: (d_z,)
+        z_test = mu.squeeze(0)  # Shape: (latent_dim,)
 
-        # Lines 2-4: Block-Diagonal Mahalanobis Distances
+        # Compute Mahalanobis distances to all classes
         dists = compute_block_mahalanobis_distances(
             z_test,
             self.profiles,
@@ -223,17 +218,17 @@ class WireSpeedEdgeDetector:
 
         dist_dict: Dict[int, float] = {c: float(v.item()) for c, v in dists.items()}
 
-        # Normalized scores: D_c(z) / tau_{alpha, c} (LaTeX Eq. 4.10)
+        # Normalized scores: D_c(z) / threshold_c
         scores_dict: Dict[int, float] = {}
         for c, d in dist_dict.items():
             tau_c = self.profiles[c].conformal_threshold
             tau_safe = tau_c if (tau_c > 0.0 and math.isfinite(tau_c)) else 1.0
             scores_dict[c] = d / tau_safe
 
-        # Conformal acceptance set: C(z) = {c | D_c(z) <= tau_c} (LaTeX Eq. 4.9)
+        # Conformal acceptance set: C(z) = {c | D_c(z) <= threshold_c}
         accepted_classes = [c for c, d in dist_dict.items() if d <= self.profiles[c].conformal_threshold]
 
-        # Decision Rule (LaTeX Eq. 4.10): Reject iff C(z) is empty; else argmin_{c in C(z)} D_c(z) / tau_c
+        # Open-set decision rule: reject iff conformal set is empty
         if not accepted_classes:
             is_unknown = True
             pred_label = self.unknown_label
@@ -259,7 +254,7 @@ class WireSpeedEdgeDetector:
     def predict_batch(
         self, x: torch.Tensor
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Execute Section 4.4 decision rule on a batch of test flow vectors.
+        """Execute open-set decision rule on a batch of test flow vectors.
 
         Returns:
             (predictions, is_unknown_flags, candidate_classes, nonconformity_scores)
@@ -304,17 +299,17 @@ class WireSpeedEdgeDetector:
             device=device,
         )
 
-        # Conformal acceptance mask: C(z) = {c | D_c(z) <= tau_c} (LaTeX Eq. 4.9)
+        # Conformal acceptance mask: sample distance <= class threshold
         accepted_mask = dist_matrix <= thresholds.unsqueeze(0)  # (N, C)
         has_accepted = torch.any(accepted_mask, dim=1)  # (N,)
         is_unknown_tensor = ~has_accepted  # (N,)
 
-        # Normalized distances: D_c(z) / tau_{alpha, c} (LaTeX Eq. 4.10)
+        # Normalized distances: distance / threshold
         valid_tau = (thresholds > 0.0) & torch.isfinite(thresholds)
         safe_thresholds = torch.where(valid_tau, thresholds, torch.ones_like(thresholds))
         norm_dist_matrix = dist_matrix / safe_thresholds.unsqueeze(0)  # (N, C)
 
-        # Decision rule (LaTeX Eq. 4.10): argmin_{c in C(z)} D_c(z) / tau_c if C(z) != empty, else argmin over all classes
+        # Decision rule: minimize normalized distance among accepted classes; if empty, minimize overall
         norm_for_accepted = torch.where(accepted_mask, norm_dist_matrix, torch.tensor(float("inf"), device=device))
         best_indices = torch.where(
             has_accepted,
@@ -342,7 +337,7 @@ class WireSpeedEdgeDetector:
 
     @torch.no_grad()
     def predict_batch_detailed(self, x: torch.Tensor) -> Dict[str, Any]:
-        """Execute Section 4.4 decision rule and return full diagnostic arrays including conformal prediction sets."""
+        """Execute open-set decision rule and return diagnostic arrays including conformal prediction sets."""
         try:
             device = next(self.encoder.parameters()).device
         except (StopIteration, AttributeError):
@@ -377,7 +372,7 @@ class WireSpeedEdgeDetector:
         has_accepted = torch.any(accepted_mask, dim=1)
         is_unk_tensor = ~has_accepted
 
-        # Decision rule (LaTeX Eq. 4.10)
+        # Decision rule: argmin over accepted classes
         norm_for_accepted = torch.where(accepted_mask, norm_dist_matrix, torch.tensor(float("inf"), device=device))
         best_indices = torch.where(
             has_accepted,
@@ -413,83 +408,5 @@ class WireSpeedEdgeDetector:
             "latent_z": z_batch.detach().cpu().numpy(),
             "dist_matrix": dist_matrix.detach().cpu().numpy(),
         }
-
-    @torch.no_grad()
-    def predict_batch_three_way(
-        self,
-        x: torch.Tensor,
-        tau_accept_map: Optional[Dict[int, float]] = None,
-        tau_reject_map: Optional[Dict[int, float]] = None,
-    ) -> ThreeWayConformalDecisionResult:
-        """Execute Section 4.5 three-way open-set decision policy (POS / BND / NEG) on a batch of flows.
-
-        Returns:
-            ThreeWayConformalDecisionResult with actions ('accept', 'abstain', 'reject'),
-            predictions, candidate_classes, scores, and boolean masks (is_accepted, is_abstained, is_rejected).
-        """
-        tau_rej = tau_reject_map if tau_reject_map is not None else self.tau_reject_map
-        tau_acc = tau_accept_map if tau_accept_map is not None else self.tau_accept_map
-
-        try:
-            device = next(self.encoder.parameters()).device
-        except (StopIteration, AttributeError):
-            device = x.device
-        x = x.to(device)
-
-        if hasattr(self.encoder, "extract_features"):
-            z_batch = self.encoder.extract_features(x)
-        else:
-            output = self.encoder(x)
-            if isinstance(output, tuple):
-                if len(output) == 4:
-                    z_batch = output[2] if output[2] is not None else output[1]
-                elif len(output) >= 5:
-                    z_batch = output[3]
-                else:
-                    z_batch = output[0]
-            else:
-                z_batch = output
-
-        dists = compute_block_mahalanobis_distances(
-            z_batch,
-            self.profiles,
-            num_blocks=self.num_blocks,
-            block_dim=self.block_dim,
-            normalize_features=self.normalize_features,
-            metric_type=self.metric_type,
-        )
-
-        class_keys = sorted(self.profiles.keys())
-        dist_matrix = torch.stack([dists[c] for c in class_keys], dim=1)
-
-        return compute_three_way_conformal_decision(
-            dist_matrix=dist_matrix,
-            tau_reject_map=tau_rej,
-            tau_accept_map=tau_acc,
-            unknown_label=self.unknown_label,
-        )
-
-    @torch.no_grad()
-    def predict_sample_three_way(
-        self,
-        x: torch.Tensor,
-        tau_accept_map: Optional[Dict[int, float]] = None,
-        tau_reject_map: Optional[Dict[int, float]] = None,
-    ) -> Tuple[str, int, int, float]:
-        """Execute Section 4.5 three-way decision on a single input flow vector.
-
-        Returns:
-            (action, predicted_label, candidate_class, nonconformity_score)
-            where action in {"accept", "abstain", "reject"}.
-        """
-        if x.ndim == 1:
-            x = x.unsqueeze(0)
-        res = self.predict_batch_three_way(x, tau_accept_map, tau_reject_map)
-        return (
-            str(res.actions[0]),
-            int(res.predictions[0]),
-            int(res.candidate_classes[0]),
-            float(res.scores[0]),
-        )
 
 

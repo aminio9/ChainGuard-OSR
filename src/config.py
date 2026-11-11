@@ -46,7 +46,7 @@ class PartitionConfig(BaseModel):
 
 class FederatedConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
-    algorithm: str = "fedtros_mc"
+    algorithm: str = "proposed"
     num_clients: int = 10
     client_fraction: float = 1.0
     num_rounds: int = 30
@@ -88,19 +88,11 @@ class OptimizationConfig(BaseModel):
 
 
 class LossConfig(BaseModel):
-    tau_bla: float = 0.0
-    gamma_bla: Optional[float] = 0.0
-    laplace_eps: float = 0.1
+    model_config = ConfigDict(extra="allow")
+    tau_bla: float = 1.0
+    gamma_bla: Optional[float] = 1.0
+    laplace_eps: float = 0.0
     lambda_vib: float = 0.01
-    beta_cb: float = 0.999
-    focal_gamma: float = 2.0
-    lambda_anchor: float = 0.0
-    primal_dual_rho: float = 0.0
-    tau_g: float = 2.0
-    max_lambda_anchor: float = 1.0
-    anchor_kappa: float = 10.0
-    rho_warm: float = 0.15
-    anchor_t0: float = 0.15
 
 
 class OSRConfig(BaseModel):

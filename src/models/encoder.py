@@ -21,12 +21,12 @@ def get_activation(act_name: str) -> nn.Module:
 
 
 class VIBEncoder(BaseNetwork):
-    """Variational Information Bottleneck (VIB) Feature Encoder (Equations 3-4 & Section 5.3).
+    """Variational Information Bottleneck (VIB) Feature Encoder.
 
-    Supports MLP backbone (e.g. 512 -> 256 -> 128 with GELU/ReLU) mapping to Gaussian parameters (mu, logvar).
-    Reparameterization Trick:
-        z = mu + epsilon * exp(0.5 * logvar),  where epsilon ~ N(0, I) during training.
-        z = mu deterministically during inference (eval mode).
+    Maps input features through hidden layers to Gaussian parameters (mean mu and log-variance).
+    Uses the reparameterization trick during training:
+        z = mu + epsilon * exp(0.5 * logvar),  where epsilon ~ N(0, I).
+    During inference, returns the deterministic mean vector mu.
     """
 
     def __init__(

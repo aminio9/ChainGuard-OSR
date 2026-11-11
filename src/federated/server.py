@@ -1,4 +1,16 @@
-"""Federated server orchestrator coordinating the 3-Phase protocol (LaTeX Algorithm 1)."""
+"""Coordinator Server for Federated Intrusion Detection.
+
+Orchestrates the complete workflow without accessing raw traffic or local embeddings:
+    - Representation Learning: Aggregates client encoder parameters and classifier heads;
+      freezes the global encoder upon convergence.
+    - Statistical Profiling: Computes multi-prototype reference centers for normal traffic,
+      reconstructs global class covariance matrices using the Law of Total Variance,
+      and stabilizes them using OAS shrinkage.
+    - Conformal Calibration: Aggregates local nonconformity histograms and determines
+      Mondrian conformal decision thresholds.
+    - Edge Deployment: Broadcasts class profiles and thresholds to edge nodes for wire-speed
+      runtime open-set detection.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +40,7 @@ from src.config import AppConfig
 
 
 class FederatedServer:
-    """Central orchestrator coordinating Phase I representation learning, Phase II moment aggregation, and Phase III edge deployment (LaTeX Algorithm 1)."""
+    """Central orchestrator coordinating representation learning, moment aggregation, and edge deployment."""
 
     def __init__(
         self,
@@ -42,7 +54,7 @@ class FederatedServer:
         self.num_clients = len(clients)
         self.aggregation_strategy = getattr(config.federated, "aggregation_strategy", "decoupled").lower()
 
-        # Initialize global model: VIB Encoder E_theta + Classification Head C_phi (LaTeX Section 4.1)
+        # Initialize global model: VIB Encoder + Auxiliary Classifier Head
         self.global_model = VIBClassifierNetwork(
             in_features=config.model.in_features,
             latent_dim=config.model.latent_dim,
@@ -55,17 +67,17 @@ class FederatedServer:
             stochastic_encoder=config.model.stochastic_encoder,
         ).to(self.device)
 
-        # Global model parameters w^0 = (theta_g^0, phi_g^0)
+        # Global model parameters
         self.global_params = {k: v.clone() for k, v in self.global_model.state_dict().items()}
         self.global_encoder_params = self.global_model.get_encoder_parameters()
 
-        # Phase II Aggregated Profiles via Law of Total Variance (LaTeX Section 4.2)
+        # Aggregated class profiles and calibration parameters
         self.global_profiles: Dict[int, GlobalClassProfile] = {}
         self.calibration_counts: Dict[int, int] = {}
         self.calibration_thresholds: Dict[int, float] = {}
         self.round_history: List[Dict[str, Any]] = []
 
-        # Frozen encoder flag for Phase I -> Phase II transition (LaTeX Algorithm 1)
+        # Flag indicating whether representation learning is complete and encoder is frozen
         self.encoder_frozen: bool = False
 
     def compute_cosine_learning_rate(
@@ -75,9 +87,8 @@ class FederatedServer:
         eta_0: float = 0.001,
         eta_min: float = 1e-6,
     ) -> float:
-        """Compute scheduled learning rate via Cosine Annealing (LaTeX Equation 93).
-
-        eta_t = eta_min + 0.5 * (eta_0 - eta_min) * (1 + cos(pi * t / T))
+        """Compute scheduled learning rate via Cosine Annealing:
+            eta_t = eta_min + 0.5 * (eta_0 - eta_min) * (1 + cos(pi * t / T))
         """
         ratio = min(max(float(round_idx) / max(total_rounds, 1), 0.0), 1.0)
         eta_t = eta_min + 0.5 * (eta_0 - eta_min) * (1.0 + math.cos(math.pi * ratio))
@@ -86,16 +97,16 @@ class FederatedServer:
     def select_active_clients(
         self, fraction: float, seed: Optional[int] = None
     ) -> List[FederatedClient]:
-        """Select a random subset S_t of active blockchain clients for the round (LaTeX Algorithm 1 Line 292)."""
+        """Select a random subset of active edge clients for the round."""
         rng = np.random.default_rng(seed)
         m = max(1, int(fraction * self.num_clients))
         selected_indices = rng.choice(self.num_clients, size=m, replace=False)
         return [self.clients[i] for i in selected_indices]
 
     def run_round(self, round_idx: int) -> Dict[str, float]:
-        """Execute one communication round of Phase I (LaTeX Section 4.2 & 4.3)."""
+        """Execute one communication round of representation learning."""
         total_rounds = self.config.federated.num_rounds
-        # Normalize 1-based caller round_idx (1..T) to 0-based t in {0, 1, ..., T-1} (Section 4.2, Eq. eq:cosine_lr)
+        # 0-based round index t in {0, ..., T-1}
         t_zero_based = (
             len(self.round_history)
             if (round_idx >= 1 and len(self.round_history) == round_idx - 1)
@@ -124,14 +135,13 @@ class FederatedServer:
             client.set_learning_rate(lr_t)
             client.synchronize(current_global_w)
 
-            # Train local epochs with L_BLA + lambda_vib * L_VIB (LaTeX Section 4.2)
+            # Train local epochs with Balanced Logit Adjustment and VIB regularization
             updated_params, _, loss_metrics = client.train_local()
 
             client_updates.append((updated_params, len(client.dataset), client.samples_per_class))
             round_losses.append(loss_metrics)
 
-        # Server Aggregation: Decoupled by default (LaTeX Algorithm 1 Line 55-56 & Eq. 78),
-        # or monolithic FedAvg for ablation studies.
+        # Server Aggregation: Decoupled by default, or monolithic FedAvg for ablation studies
         if self.aggregation_strategy in ("fedavg", "monolithic"):
             from src.aggregation.fedavg_agg import aggregate_fedavg_parameters
             fedavg_inputs = [(up, n) for up, n, _ in client_updates]
@@ -161,7 +171,7 @@ class FederatedServer:
         return avg_round_loss
 
     def freeze_global_encoder(self) -> None:
-        """LaTeX Section 4.1 & 4.3: Freeze global encoder parameters permanently (theta^* = theta^T)."""
+        """Freeze global encoder parameters permanently to establish a fixed latent representation."""
         self.global_model.eval()
         for param in self.global_model.parameters():
             param.requires_grad = False
@@ -174,7 +184,7 @@ class FederatedServer:
         alpha: Optional[float] = None,
         cal_dataset: Optional[Any] = None,
     ) -> Dict[int, GlobalClassProfile]:
-        """Execute Stage 2 Class Profiling (Section 4.3) and Stage 3 Distributed Conformal Calibration (Section 4.4).
+        """Execute Statistical Class Profiling and Distributed Conformal Calibration.
 
         Returns:
             Dict mapping class_id -> GlobalClassProfile with exact pooled covariances and conformal thresholds.
@@ -194,7 +204,7 @@ class FederatedServer:
             num_blocks = min(num_blocks, latent_dim)
             block_dim = latent_dim // num_blocks
 
-        # Stage 2 (LaTeX Algorithm 1, Phase 1): One-Shot Federated K-Means & Reference Center Broadcast (Wang et al. 2025)
+        # One-Shot Federated K-Means: reference centers for multi-modal normal traffic
         use_mp = getattr(self.config.osr, "use_multi_prototype", True)
         m0 = getattr(self.config.osr, "num_prototypes_normal", 4)
         mc_atk = getattr(self.config.osr, "num_prototypes_attack", 1)
@@ -225,7 +235,7 @@ class FederatedServer:
                     ).to(device=self.device)
                     reference_centers_map[c] = global_ref_centers
 
-        # Stage 2 (LaTeX Algorithm 1, Phase 1 & 2): Voronoi Partitioning & LOTV Moment Aggregation
+        # Voronoi Partitioning & Moment Extraction on Clients
         class_moments_map: Dict[int, List[ClientClassMoment]] = {
             c: [] for c in range(len(self.config.data.known_classes))
         }
@@ -246,7 +256,7 @@ class FederatedServer:
                 if c in class_moments_map:
                     class_moments_map[c].append(m_item)
 
-        # Section 4.3 Fallback: if a rare class has N_{k,c} < N_min on every node, fall back to K_c = {k in M : N_{k,c} > 0}
+        # Fallback: if a rare class has insufficient samples across all nodes, lower sample threshold
         for c, subs in class_moments_map.items():
             if not subs:
                 for client in self.clients:
@@ -263,7 +273,7 @@ class FederatedServer:
                             if m_item.class_id == c:
                                 class_moments_map[c].append(m_item)
 
-        # Law of Total Variance aggregation with Common Intra-Cluster Covariance (LaTeX Section 4.5.1 / Prop. 1)
+        # Law of Total Variance aggregation to reconstruct global profiles
         self.global_profiles = aggregate_total_variance_moments(
             class_submissions=class_moments_map,
             num_blocks=num_blocks,
@@ -272,9 +282,7 @@ class FederatedServer:
             min_cov_samples=min_cov_samples,
         )
 
-
-
-        # Stage 3 (Section 4.1 & 4.4): Distributed Mondrian Conformal Calibration over K_{cal, c} = {k in M : n_{cal,k,c} >= 1}
+        # Distributed Mondrian Conformal Calibration
         # Nodes evaluate s_{k,j}^{(c)} = D_block(f_{theta^*}(x_{k,j}), c) on D_{cal, k, c} against global profiles,
         # report scalar maximum s_{max,k,c} so the server defines shared grid [0, S_{max,c}], and upload
         # right-closed empirical CDF histograms h_{k,c} over I_{c,1} = [xi_{c,0}, xi_{c,1}], I_{c,m} = (xi_{c,m-1}, xi_{c,m}].
@@ -388,7 +396,7 @@ class FederatedServer:
                     c_arrays = client_scores_per_class[c]
                     n_cal_c = int(sum(len(arr) for arr in c_arrays))
                     if n_cal_c > 0:
-                        # Establish finite upper bound B_c independent of calibration outliers (LaTeX Section 4.6.1)
+                        # Establish finite upper bound B_c independent of calibration outliers
                         s_max_local = max(float(np.max(arr)) for arr in c_arrays)
                         b_c = max(chi2_b_c, s_max_local)
                         shared_bin_edges = np.linspace(0.0, b_c, num_bins + 1)
@@ -416,7 +424,7 @@ class FederatedServer:
                 self.calibration_counts[int(c)] = int(self.global_profiles[c].total_samples)
                 self.calibration_thresholds[int(c)] = theoretical_tau
 
-        # Broadcast synthesized profiles back to all edge clients (Phase III, LaTeX Algorithm 2)
+        # Broadcast synthesized profiles back to all edge clients
         self.broadcast_profiles_to_clients(
             unknown_label=len(self.config.data.known_classes),
             num_blocks=num_blocks,
@@ -431,7 +439,7 @@ class FederatedServer:
         num_blocks: Optional[int] = None,
         block_dim: Optional[int] = None,
     ) -> None:
-        """Broadcast global class profiles back to all edge nodes (LaTeX Algorithm 1 Line 25 & Algorithm 2 Line 1)."""
+        """Broadcast global class profiles back to all edge nodes."""
         if not self.global_profiles:
             raise RuntimeError("Profiles must be aggregated before broadcasting to clients.")
 
@@ -456,7 +464,7 @@ class FederatedServer:
         block_dim: Optional[int] = None,
         normalize_features: Optional[bool] = None,
     ) -> WireSpeedEdgeDetector:
-        """Instantiate the Phase III Wire-Speed Edge Detector (LaTeX Algorithm 2)."""
+        """Instantiate the Wire-Speed Edge Detector for runtime inference."""
         if not self.global_profiles:
             raise RuntimeError("Phase II profiling must be executed before creating Edge Detector.")
 

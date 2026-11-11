@@ -164,9 +164,50 @@ def test_federated_align_and_average_prototypes_privacy():
         assert math.isclose(n.item(), 1.0, abs_tol=1e-5)
 
 
+def test_multi_prototype_independent_covariances():
+    """Verify independent covariance and precision matrices for each sub-cluster."""
+    from src.aggregation.total_variance import aggregate_total_variance_moments, ClientClassMoment
+
+    d_z = 8
+    num_blocks = 1
+    d_b = 8
+
+    # Create 2 subclusters for class 0 with very different covariance scales
+    # Subcluster 0: scale 1.0; Subcluster 1: scale 5.0
+    c0_sub0_cov = [torch.eye(d_b) * 1.0]
+    c0_sub1_cov = [torch.eye(d_b) * 5.0]
+
+    submissions = {
+        0: [
+            ClientClassMoment(client_id=0, sample_count=50, mu=torch.zeros(d_z), block_covs=c0_sub0_cov, cluster_id=0),
+            ClientClassMoment(client_id=0, sample_count=50, mu=torch.ones(d_z) * 2.0, block_covs=c0_sub1_cov, cluster_id=1),
+        ]
+    }
+
+    profiles = aggregate_total_variance_moments(
+        submissions,
+        num_blocks=num_blocks,
+        block_dim=d_b,
+        tikhonov_eps=1e-4,
+    )
+
+    prof = profiles[0]
+    assert prof.proto_inv_block_covs is not None
+    assert len(prof.proto_inv_block_covs) == 2
+
+    # Precision matrix for sub0 should have larger eigenvalues (inverse of smaller cov)
+    # than precision matrix for sub1 (inverse of larger cov)
+    inv_sub0 = prof.proto_inv_block_covs[0][0]
+    inv_sub1 = prof.proto_inv_block_covs[1][0]
+
+    assert not torch.allclose(inv_sub0, inv_sub1)
+    assert inv_sub0[0, 0] > inv_sub1[0, 0]
+
+
 if __name__ == "__main__":
     test_multi_prototype_backward_compatibility()
     test_multi_prototype_minimum_distance()
     test_wire_speed_edge_detector_with_multi_prototypes()
     test_federated_align_and_average_prototypes_privacy()
+    test_multi_prototype_independent_covariances()
     print("ALL MULTI-PROTOTYPE TESTS PASSED SUCCESSFULLY!")
